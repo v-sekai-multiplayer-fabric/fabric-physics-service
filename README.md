@@ -5,6 +5,7 @@ what a caller can reach and what it cannot.
 
 | member | what it does | where it runs |
 | --- | --- | --- |
+| `queen` | the game, and the store's caller. A plane: a process with no networking. | here, in `src/` |
 | `fabric-store-plane` | SQLite over a VFS whose pages live in FoundationDB, on rivet's Depot layout | on its caller's machine |
 | FoundationDB | the pages, and every durable transaction. Below the planes, not one of them. | anywhere |
 | `versitygw` | the S3-compatible endpoint FoundationDB backs up to with `fdbbackup` | with FoundationDB |
@@ -15,6 +16,12 @@ A caller reaches the store plane over iceoryx2, and **iceoryx2 is shared memory*
 plane sits on the machine its caller sits on, and it is not a thing to deploy on its own.
 `fly/fly.toml` in `fabric-store-plane` says the same from the other side: a second Fly app
 cannot be the other end of a ring.
+
+**There is no ring here yet, and it would be wrong to imply one.** `queen` links the VFS
+into its own process rather than speaking to a plane over iceoryx2, because the
+thread-per-core loop that would answer is `fabric-store-plane#5` and is not running. So the
+two are one process today. When that loop lands, the game reaches it over the ring instead
+and nothing above changes — which is the point of the caller never opening a database.
 
 What needs no ring is **FoundationDB**. A commit is one FoundationDB transaction, about 1 ms,
 and everything reaching the store already pays that, so the pages may be their own machine,
@@ -85,10 +92,14 @@ every check above while being no game at all.
 
 ## State
 
-**Not built as a deployment.** This holds the packing. The Fly machine definition for FoundationDB and
-versitygw comes next, and that is the only part of this with a machine of its own: the plane
-ships with whatever calls it. `fabric-store-plane#17` tracks it.
+**The game builds and plays.** CI plays two wards on two seeds against a live FoundationDB
+and holds them to their arithmetic, so the domain has a workload that runs on every push.
 
-One plane that runs on somebody else's machine, and the rest below the planes, is a thin thing
-to call a domain, since a domain is a group of planes that share a ring. Whether this stays a
-domain or becomes the store plane plus the storage under it is `fabric-store-plane#19`.
+**Not deployed.** There is no Fly machine definition yet for FoundationDB and versitygw, and
+that is the only part of this with a machine of its own, since the plane ships with whatever
+calls it. `fabric-store-plane#17` tracks it.
+
+`fabric-store-plane#19` asked whether one plane on somebody else's machine is a thin thing to
+call a domain. It is less thin than it was: there are two planes now, `queen` and the store,
+and they are in one process rather than on a ring. Whether that counts is still the open
+question, and having a real caller is what makes it worth answering rather than academic.
