@@ -1,0 +1,4 @@
+# The CI script is read by bash inside a Linux container, so it is LF wherever it is checked
+# out. A Windows clone that converted it would hand the container a `\r` on every line.
+*.sh text eol=lf
+docker-compose.yml text eol=lf

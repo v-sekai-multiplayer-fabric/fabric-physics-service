@@ -90,6 +90,19 @@ CI plays two wards and asserts all three, and then asserts something an invarian
 that the Queen actually got to build something. A balance where she never can would pass
 every check above while being no game at all.
 
+### Running CI here
+
+CI needs an Ubuntu toolchain and a live FoundationDB, which is not what a developer's machine
+is — least of all a Windows one. So the machine lends a container the repository and nothing
+else, and the container is the same `ubuntu-24.04` with the same FDB the workflow uses:
+
+    docker compose run --rm ci        # the whole of .github/workflows/ci.yml
+    docker compose run --rm shell     # same container, cluster up, at a prompt
+
+The FoundationDB packages land in a named volume, so only the first run downloads them. The
+build goes to `/build` inside the container rather than into the mounted tree, because the
+host's `build/` is not this one's.
+
 ## State
 
 **The game builds and plays.** CI plays two wards on two seeds against a live FoundationDB
