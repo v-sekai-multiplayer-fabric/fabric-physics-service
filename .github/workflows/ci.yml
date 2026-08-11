@@ -1,0 +1,77 @@
+# Play the game. That is the test.
+#
+# A ward of Sparks is the store plane's workload: every Spark is a database, every cycle is
+# a commit for each of them, and paying one is a transfer between two databases. So a run
+# that holds its invariants is at once a game that works and a store that did not lose
+# anything — which is what #10 asked for and had never had.
+name: ci
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  play:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      FDB_VERSION: "7.3.76"
+      WEFT_FDB_CLUSTER_FILE: /etc/foundationdb/fdb.cluster
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: cache FoundationDB packages
+        uses: actions/cache@v6
+        with:
+          path: ~/fdb-debs
+          key: fdb-debs-${{ env.FDB_VERSION }}
+
+      - name: Install FoundationDB
+        run: |
+          mkdir -p ~/fdb-debs
+          [ -f ~/fdb-debs/clients.deb ] || curl -fsSL -o ~/fdb-debs/clients.deb \
+            "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
+          [ -f ~/fdb-debs/server.deb ] || curl -fsSL -o ~/fdb-debs/server.deb \
+            "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-server_${FDB_VERSION}-1_amd64.deb"
+          sudo dpkg -i ~/fdb-debs/clients.deb ~/fdb-debs/server.deb
+          for i in $(seq 1 30); do
+            fdbcli --exec 'status minimal' | grep -q 'The database is available' && break
+            sleep 2
+          done
+          fdbcli --exec 'status minimal'
+
+      - name: Install SQLite headers
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev
+
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j
+
+      # 200 cycles, and the ward has to stay honest through every one of them. The check
+      # runs inside each cycle, not only at the end, so a scrip that goes missing is caught
+      # in the cycle that lost it rather than two hundred later.
+      - name: Play a ward, and hold it to its arithmetic
+        run: ./build/queen check 200 20260811 8
+
+      # A second ward with a different seed and more Sparks. Sixteen databases committing
+      # every cycle is the commit depth the store plane exists for, and a different seed
+      # walks a different path through the same rules.
+      - name: Play a larger ward on another seed
+        run: ./build/queen check 120 990099 16
+
+      # The Queen must actually get to build something. A run where she never can is a game
+      # that balanced itself out of existence, and it would still pass every invariant above
+      # — which is exactly the kind of green nobody should trust.
+      - name: The ward must have been built
+        run: |
+          out=$(./build/queen play 150 4242 8)
+          echo "$out"
+          echo "$out" | grep -q "venues: .*Tavern" || {
+            echo "the Queen never commissioned anything in 150 cycles"; exit 1; }

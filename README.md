@@ -40,9 +40,52 @@ already one FoundationDB round trip. FoundationDB is a database the store plane 
 of. It sits below the planes rather than among them, so it is not a member the way a plane is,
 and calling it a service would put it in the same word as a plane and a domain.
 
+## A Queen of the Gyre
+
+The domain has a tenant now, and it is a game.
+
+`queen` is a settlement game with no renderer, no client and no engine. The ward is a SQLite
+database over the store plane's VFS, every Spark is a database of their own, and a cycle is
+a transaction. What you can see of the game is what you can `SELECT`.
+
+    ./build/queen play  200 20260811 8     play a ward and see what became of it
+    ./build/queen check 200 20260811 8     play it twice and hold it to its arithmetic
+
+It is shaped after the commission-and-wait games, where the monarch pays for buildings and
+then waits: the Queen commissions venues in the Commons and the Under-Market, the Sparks
+read the contract board and choose for themselves, and she never takes a contract. A loop
+like that is a state machine over days with nothing in the critical path to draw, which is
+the one game shape genuinely better as a database than as an engine.
+
+The setting is `rfd/0085`, so none of it is borrowed. Sparks are digitised people in rented
+Frames on a failing ring-station, and the antagonist is the Debt Clock — entropy and
+compound interest rather than a dark lord. The tension is that every scrip paid to the
+creditor is one that did not become a venue, and a venue is what makes the next cycle earn
+more.
+
+### Why a game is the right tenant
+
+The store plane's claim was that commits scale with the number of actors committing at once,
+and it had never run. A ward of sixteen Sparks is sixteen databases committing every cycle,
+and **paying one of them is a transfer between two databases** — the parallel commit
+protocol, reached by paying somebody rather than by a fixture built to reach it.
+
+The invariants are the game's own arithmetic, which is what makes them worth checking:
+
+- scrip is conserved: `treasury + purses + paid to the clock + built with == issued`
+- salvage is unique, so no item is in two Sparks' hands
+- one seed makes one ward, checked by playing it twice and comparing
+
+The first of those caught a real bug the first time it ran: commissioning a venue moved
+scrip out of the ward and nothing recorded where it went.
+
+CI plays two wards and asserts all three, and then asserts something an invariant cannot —
+that the Queen actually got to build something. A balance where she never can would pass
+every check above while being no game at all.
+
 ## State
 
-**Not built.** This holds the packing. The Fly machine definition for FoundationDB and
+**Not built as a deployment.** This holds the packing. The Fly machine definition for FoundationDB and
 versitygw comes next, and that is the only part of this with a machine of its own: the plane
 ships with whatever calls it. `fabric-store-plane#17` tracks it.
 
