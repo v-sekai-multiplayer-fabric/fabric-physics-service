@@ -6,7 +6,7 @@ what a caller can reach and what it cannot.
 | member | what it does | where it runs |
 | --- | --- | --- |
 | `fabric-store-plane` | SQLite over a VFS whose pages live in FoundationDB, on rivet's Depot layout | on its caller's machine |
-| FoundationDB | the pages, and every durable transaction. A service, not a plane. | anywhere |
+| FoundationDB | the pages, and every durable transaction. Below the planes, not one of them. | anywhere |
 | `versitygw` | the S3-compatible endpoint FoundationDB backs up to with `fdbbackup` | with FoundationDB |
 
 ## What needs a ring, and what does not
@@ -36,11 +36,16 @@ as binding, for the same reason: a local file makes storage stateful and not mig
 
 It is not two domains. SQLite and FoundationDB are not separable here, because the VFS is the
 bridge between them: splitting them would put a ring hop inside a page read, and a page read is
-already one FoundationDB round trip. FoundationDB is a database service that the store plane is
-a client of, and not a plane.
+already one FoundationDB round trip. FoundationDB is a database the store plane is a client
+of. It sits below the planes rather than among them, so it is not a member the way a plane is,
+and calling it a service would put it in the same word as a plane and a domain.
 
 ## State
 
 **Not built.** This holds the packing. The Fly machine definition for FoundationDB and
-versitygw comes next, and it is the only part of this domain that has a machine of its own:
-the plane ships with whatever calls it. `fabric-store-plane#17` tracks that.
+versitygw comes next, and that is the only part of this with a machine of its own: the plane
+ships with whatever calls it. `fabric-store-plane#17` tracks it.
+
+One plane that runs on somebody else's machine, and the rest below the planes, is a thin thing
+to call a domain, since a domain is a group of planes that share a ring. Whether this stays a
+domain or becomes the store plane plus the storage under it is `fabric-store-plane#19`.
