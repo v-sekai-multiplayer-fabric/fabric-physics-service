@@ -1,23 +1,29 @@
 # fabric-store-domain
 
-Durable state, as one deployable thing. A **domain** is a packing of planes and edge planes,
-and this is the packing that needs no ring.
+Durable state. A **domain** is a packing of planes and edge planes, and this one is packed by
+what a caller can reach and what it cannot.
 
-| member | what it does |
-| --- | --- |
-| `fabric-store-plane` | SQLite over a VFS whose pages live in FoundationDB, on rivet's Depot layout |
-| FoundationDB | the pages, and every durable transaction. A service, not a plane. |
-| `versitygw` | the S3-compatible endpoint FoundationDB backs up to with `fdbbackup` |
+| member | what it does | where it runs |
+| --- | --- | --- |
+| `fabric-store-plane` | SQLite over a VFS whose pages live in FoundationDB, on rivet's Depot layout | on its caller's machine |
+| FoundationDB | the pages, and every durable transaction. A service, not a plane. | anywhere |
+| `versitygw` | the S3-compatible endpoint FoundationDB backs up to with `fdbbackup` | with FoundationDB |
 
-## Why it is a domain of its own
+## What needs a ring, and what does not
 
-**A ring forces co-location, and this needs no ring.** A commit costs one FoundationDB
-transaction, about 1 ms, and everything reaching the store already pays that. So the store may
-be its own machine, its own region, or several, and `fabric-zone-domain` does not care where
-it lands.
+A caller reaches the store plane over iceoryx2, and **iceoryx2 is shared memory**. So the
+plane sits on the machine its caller sits on, and it is not a thing to deploy on its own.
+`fly/fly.toml` in `fabric-store-plane` says the same from the other side: a second Fly app
+cannot be the other end of a ring.
 
-That is the same rule that packs everything else together, read the other way: a member sits
-with what it shares a ring with, and this shares a ring with nothing.
+What needs no ring is **FoundationDB**. A commit is one FoundationDB transaction, about 1 ms,
+and everything reaching the store already pays that, so the pages may be their own machine,
+their own region, or several. That is the part of this domain that deploys by itself, and
+`fabric-zone-domain` does not care where it lands.
+
+This file used to say the whole domain needed no ring, and so that the store plane could live
+anywhere. That was true of the pages and false of the plane, and the two are not the same
+thing. See `fabric-store-plane#15`.
 
 ## Why the store holds no local file
 
@@ -35,5 +41,6 @@ a client of, and not a plane.
 
 ## State
 
-**Not built.** This holds the packing. The quadlet units and the Fly machine definition come
-next.
+**Not built.** This holds the packing. The Fly machine definition for FoundationDB and
+versitygw comes next, and it is the only part of this domain that has a machine of its own:
+the plane ships with whatever calls it. `fabric-store-plane#17` tracks that.
