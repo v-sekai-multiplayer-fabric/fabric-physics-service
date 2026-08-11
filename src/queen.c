@@ -81,6 +81,76 @@ typedef struct {
 	int64_t x, y, z;
 } place_t;
 
+// ── Names for things ──────────────────────────────────────────────────────────
+//
+// An id here has two jobs and they do not fit in one field.
+//
+// Durable identity is a UUID, because a Spark carries its salvage when it migrates and the
+// receiving ward must not be able to hand out the same name. Reserving a numeric range per
+// ward would work until a ward exhausted its range, and it would fail by collision rather than
+// error. A UUID has no range to exhaust.
+//
+// It cannot be a UUIDv7, because v7 takes its first 48 bits from the wall clock and this game
+// must replay identically from a seed. RFC 9562 keeps version 8 for exactly this: a custom
+// layout. So the shape is v7's, with the cycle standing in for the timestamp, and the rest
+// filled from a hash of the facts that already determine the game. Two runs of one seed
+// therefore produce the same names, and the ids still sort in the order things happened.
+//
+// Wire identity is separate and is composite. `XRGridEntityPacket` carries a `uint32_t
+// global_id` and a `class_owner` that is already `(class << 24) | owner`, so the packet's own
+// idiom is a composite key. A hash would be wrong there: 32 bits collides at about 65 thousand
+// entities on the birthday bound, and a wire id is a primary key. Packing the ward and a local
+// counter is exact instead of probable.
+//
+// One ward's entities all share the one local space, because `global_id` is the primary key
+// for everything a subscriber is sent and not one key per class. So the classes take fixed
+// ranges, and a venue and a Spark can never arrive under the same name.
+#define WIRE_LOCAL_BITS 20
+#define WIRE_LOCAL_MAX (1u << WIRE_LOCAL_BITS)
+#define WIRE_WARD_MAX (1u << (32 - WIRE_LOCAL_BITS))
+
+#define WIRE_QUEEN 0u
+#define WIRE_VENUE_BASE 1u         // + the venue's index; there are six
+#define WIRE_SPARK_BASE 0x100u     // + the Spark's id, which is unique across the whole game
+#define WIRE_CONTRACT_BASE 0x1000u // + the board row, which starts again each cycle
+
+enum { CLASS_SPARK = 1, CLASS_VENUE = 2, CLASS_CONTRACT = 3, CLASS_QUEEN = 4 };
+
+static uint64_t mix64(uint64_t x) {
+	x += 0x9e3779b97f4a7c15ULL;
+	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+	x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+	return x ^ (x >> 31);
+}
+
+// A UUIDv8 whose high 48 bits are the cycle, so the name says when the thing appeared.
+static void uuid8(char out[37], uint64_t seed, int ward, int class, int cycle, uint64_t seq) {
+	const uint64_t h = mix64(seed ^ mix64(((uint64_t)ward << 40) ^ ((uint64_t)class << 32) ^ seq));
+	const uint64_t g = mix64(h ^ 0xd1b54a32d192ed03ULL);
+	const uint64_t ts = (uint64_t)(uint32_t)cycle & 0xffffffffffffULL;
+
+	snprintf(out, 37, "%08x-%04x-8%03x-%04x-%012llx", (unsigned)(ts >> 16),
+	         (unsigned)(ts & 0xffff), (unsigned)((h >> 52) & 0xfff),
+	         (unsigned)(0x8000 | ((h >> 36) & 0x3fff)), (unsigned long long)(g & 0xffffffffffffULL));
+}
+
+// The wire name. Exact, and it fails loudly rather than wrapping — masking the local part
+// would be the same failure the numeric range had: two entities under one name, discovered
+// only by whatever the collision broke.
+static uint32_t wire_id(int ward, uint32_t local) {
+	if (ward < 0 || (uint32_t)ward >= WIRE_WARD_MAX || local >= WIRE_LOCAL_MAX) {
+		fprintf(stderr,
+		        "a wire id for ward %d, local %u, does not fit: a ward is %u and a local is %u\n",
+		        ward, local, WIRE_WARD_MAX, WIRE_LOCAL_MAX);
+		exit(2);
+	}
+	return ((uint32_t)ward << WIRE_LOCAL_BITS) | local;
+}
+
+static uint32_t class_owner(int class, int ward) {
+	return ((uint32_t)class << 24) | ((uint32_t)ward & 0xffffff);
+}
+
 // ── The ward ──────────────────────────────────────────────────────────────────
 //
 // Six venues, three in the Commons and three in the Under-Market, taken from RFD 0085's
@@ -163,7 +233,9 @@ typedef struct {
 	int found;   // every piece of salvage this ward accounts for
 	int retired; // every scrip paid to the Debt Clock
 	int spent;   // every scrip paid out of the ward for a venue
-	int next_item;
+	int ward_no; // which ward of the game this is, and the owner in a wire id
+	uint64_t seed;
+	uint64_t seq; // counts what this ward has named, and feeds the UUIDs
 } gyre_t;
 
 // A name with an apostrophe in it, fit for SQL. The Gyre's own venues are called things
@@ -232,18 +304,30 @@ static int found_ward(gyre_t *g, const char *prefix, int nsparks, uint64_t seed,
 	snprintf(name, sizeof name, "%s-ward.db", prefix);
 	if (!(g->ward = open_db(name))) return 1;
 
+	// The ward's own number, settled before anything is named. It is the owner half of every
+	// wire id here and one of the facts a UUID is derived from, so a Spark that migrates keeps
+	// names no other ward can hand out.
+	g->ward_no = base / SPARKS_PER_WARD;
+
 	if (run(g->ward, "DROP TABLE IF EXISTS ward; DROP TABLE IF EXISTS venue;"
 	                 "DROP TABLE IF EXISTS board; DROP TABLE IF EXISTS ledger;"))
 		return 1;
 	// The place columns are the game's own answer to "where". A client that draws the ward
 	// reads them, and the interest filter compares them, so they live in the database rather
 	// than in the process that happens to be running.
+	//
+	// `wire` and `owner` are the same answer to "which". They are what a subscriber gets in an
+	// `XRGridEntityPacket`, so a client can match a packet to the row it came from with a
+	// `SELECT` rather than by guessing from a position — which is the premise of the whole
+	// domain, and the reason a wire id is a column and not a thing the process computes and
+	// keeps to itself.
 	if (run(g->ward,
 	        "CREATE TABLE ward(cycle INT, treasury INT, debt INT, issued INT, retired INT);"
 	        "CREATE TABLE venue(id INT PRIMARY KEY, name TEXT, cost INT, built INT,"
-	        "                   x INT, y INT, z INT);"
+	        "                   x INT, y INT, z INT, wire INT UNIQUE, owner INT);"
 	        "CREATE TABLE board(id INTEGER PRIMARY KEY, cycle INT, kind TEXT, payout INT,"
-	        "                   risk INT, taken INT, outcome TEXT, x INT, y INT, z INT);"
+	        "                   risk INT, taken INT, outcome TEXT, x INT, y INT, z INT,"
+	        "                   wire INT UNIQUE, owner INT);"
 	        "CREATE TABLE ledger(id INTEGER PRIMARY KEY, cycle INT, what TEXT, amount INT,"
 	        "                    spark INT)"))
 		return 1;
@@ -253,8 +337,10 @@ static int found_ward(gyre_t *g, const char *prefix, int nsparks, uint64_t seed,
 		const place_t p = VENUE_PLACES[i];
 		snprintf(sql, sizeof sql,
 		         "INSERT INTO venue VALUES (%d, '%s', %d, 0, %" PRId64 ", %" PRId64
-		         ", %" PRId64 ")",
-		         i, quoted(VENUES[i].name, safe, sizeof safe), VENUES[i].cost, p.x, p.y, p.z);
+		         ", %" PRId64 ", %u, %u)",
+		         i, quoted(VENUES[i].name, safe, sizeof safe), VENUES[i].cost, p.x, p.y, p.z,
+		         wire_id(g->ward_no, WIRE_VENUE_BASE + (uint32_t)i),
+		         class_owner(CLASS_VENUE, g->ward_no));
 		if (run(g->ward, sql)) return 1;
 	}
 
@@ -266,10 +352,8 @@ static int found_ward(gyre_t *g, const char *prefix, int nsparks, uint64_t seed,
 	g->retired = 0;
 	g->cycle = 0;
 	g->found = 0;
-	// Item ids are unique across the whole game, not only inside one ward. A Spark carries its
-	// salvage when it migrates, and `held` keys on the item, so two wards that both started
-	// counting at 1 would collide the first time a traveller found something twice.
-	g->next_item = base * 100000 + 1;
+	g->seq = 0;
+	g->seed = seed;
 	rng_seed(&g->rng, seed);
 
 	snprintf(sql, sizeof sql, "INSERT INTO ward VALUES (0, %d, %d, %d, 0)", g->treasury,
@@ -288,12 +372,17 @@ static int found_ward(gyre_t *g, const char *prefix, int nsparks, uint64_t seed,
 		if (!(s->db = open_db(name))) return 1;
 		if (run(s->db, "DROP TABLE IF EXISTS spark; DROP TABLE IF EXISTS held;")) return 1;
 		if (run(s->db, "CREATE TABLE spark(id INT PRIMARY KEY, purse INT, wear INT, cycles INT,"
-		               "                   x INT, y INT, z INT);"
-		               "CREATE TABLE held(item INT PRIMARY KEY, kind TEXT, cycle INT)"))
+		               "                   x INT, y INT, z INT, wire INT, owner INT);"
+		               "CREATE TABLE held(item TEXT PRIMARY KEY, kind TEXT, cycle INT)"))
 			return 1;
+		// A Spark's local part is its id, which is already unique across the whole game, so a
+		// Spark that migrates keeps the same local and only changes wards.
 		snprintf(sql, sizeof sql,
-		         "INSERT INTO spark VALUES (%d, 0, 0, 0, %" PRId64 ", %" PRId64 ", %" PRId64 ")",
-		         id, s->at.x, s->at.y, s->at.z);
+		         "INSERT INTO spark VALUES (%d, 0, 0, 0, %" PRId64 ", %" PRId64 ", %" PRId64
+		         ", %u, %u)",
+		         id, s->at.x, s->at.y, s->at.z,
+		         wire_id(g->ward_no, WIRE_SPARK_BASE + (uint32_t)id),
+		         class_owner(CLASS_SPARK, g->ward_no));
 		if (run(s->db, sql)) return 1;
 	}
 	return 0;
@@ -362,6 +451,17 @@ static int post_board(gyre_t *g) {
 		         " VALUES (%d, '%s', %d, %d, -1, NULL, %" PRId64 ", %" PRId64 ", %" PRId64 ")",
 		         g->cycle, kind, payout, risk, p.x, p.y, p.z);
 		if (run(g->ward, sql)) return 1;
+
+		// The wire name follows the row, because the row id is what the local part is drawn
+		// from and SQLite only settles it on the insert. The board is emptied every cycle and
+		// the ids start again, so a contract's wire name is reused; that is right for a marker
+		// that only exists for one cycle, and durable identity is the UUID's job.
+		const sqlite3_int64 row = sqlite3_last_insert_rowid(g->ward);
+		snprintf(sql, sizeof sql,
+		         "UPDATE board SET wire = %u, owner = %u WHERE id = %lld",
+		         wire_id(g->ward_no, WIRE_CONTRACT_BASE + (uint32_t)row),
+		         class_owner(CLASS_CONTRACT, g->ward_no), (long long)row);
+		if (run(g->ward, sql)) return 1;
 	}
 	return 0;
 }
@@ -413,7 +513,7 @@ static int choose(gyre_t *g, spark_t *s) {
 // Each participant is an explicit SQLite transaction. Autocommit would let the first write
 // commit on its own at xSync, and then the group would only contain whatever had not been
 // written yet.
-static int pay(gyre_t *g, spark_t *s, int amount, int item, const char *kind) {
+static int pay(gyre_t *g, spark_t *s, int amount, const char *item, const char *kind) {
 	unsigned long long txn = 0;
 	char sql[256];
 
@@ -433,8 +533,8 @@ static int pay(gyre_t *g, spark_t *s, int amount, int item, const char *kind) {
 	         s->id);
 	if (run(s->db, sql)) goto give_up;
 
-	if (item > 0) {
-		snprintf(sql, sizeof sql, "INSERT INTO held VALUES (%d, '%s', %d)", item, kind,
+	if (item) {
+		snprintf(sql, sizeof sql, "INSERT INTO held VALUES ('%s', '%s', %d)", item, kind,
 		         g->cycle);
 		if (run(s->db, sql)) goto give_up;
 	}
@@ -480,12 +580,17 @@ static int cycle(gyre_t *g) {
 
 		// Income is the only thing that makes scrip. Everything else moves it or destroys
 		// it, which is what lets a single sum say whether the ward is honest.
-		int earned = 0, item = 0;
+		int earned = 0;
+		char item[37];
+		const char *found_item = NULL;
 		if (won) {
 			earned = payout;
 			g->treasury += earned;
 			g->issued += earned;
-			item = g->next_item++;
+			// The salvage gets a name no other ward can hand out, derived from this ward's seed,
+			// its number, and how much it has named so far.
+			uuid8(item, g->seed, g->ward_no, CLASS_CONTRACT, g->cycle, g->seq++);
+			found_item = item;
 			g->found++;
 			snprintf(sql, sizeof sql,
 			         "INSERT INTO ledger(cycle, what, amount, spark) VALUES (%d,'salvage',%d,%d)",
@@ -510,7 +615,7 @@ static int cycle(gyre_t *g) {
 		// nothing, so a failed cycle still costs them.
 		const int wage = won ? earned / 2 : 4;
 		if (wage > 0 && g->treasury >= wage) {
-			if (pay(g, s, wage, item, won ? "salvage" : NULL)) return 1;
+			if (pay(g, s, wage, found_item, "salvage")) return 1;
 		}
 
 		// The Spark went to the work. This is the move that reaches other players: the Frame
@@ -607,6 +712,20 @@ static void close_ward(gyre_t *g) {
 	sqlite3_close(g->ward);
 }
 
+// Every name in a Spark's hands, folded into the running hash. `ORDER BY item` so the digest
+// is over the set rather than over whatever order the rows came back in.
+static unsigned long long fold_held(sqlite3 *db, unsigned long long h) {
+	sqlite3_stmt *st;
+	if (sqlite3_prepare_v2(db, "SELECT item FROM held ORDER BY item", -1, &st, NULL) != SQLITE_OK)
+		return h;
+	while (sqlite3_step(st) == SQLITE_ROW) {
+		const unsigned char *name = sqlite3_column_text(st, 0);
+		for (const unsigned char *p = name; p && *p; p++) h = (h ^ *p) * 1099511628211ULL;
+	}
+	sqlite3_finalize(st);
+	return h;
+}
+
 // A number that stands for the whole ward, so two runs can be compared in one line.
 static unsigned long long fingerprint(gyre_t *g) {
 	unsigned long long h = 1469598103934665603ULL;
@@ -620,6 +739,10 @@ static unsigned long long fingerprint(gyre_t *g) {
 		h = (h ^ (unsigned long long)g->sparks[i].at.x) * 1099511628211ULL;
 		h = (h ^ (unsigned long long)g->sparks[i].at.y) * 1099511628211ULL;
 		h = (h ^ (unsigned long long)g->sparks[i].at.z) * 1099511628211ULL;
+		// And what is in their hands. A name is state the same as a purse is, so the replay
+		// check has to cover it: `uuid8` draws nothing from the RNG, and a derivation that
+		// silently stopped being deterministic would otherwise leave every number matching.
+		h = fold_held(g->sparks[i].db, h);
 	}
 	return h;
 }
@@ -667,6 +790,16 @@ static int migrate(gyre_t *from, gyre_t *to, int idx) {
 	         to->cycle, s.purse, s.id);
 	if (run(to->ward, sql)) return 1;
 
+	// The wire name is drawn again, because it says which ward is sending this entity and that
+	// is what changed. A subscriber sees the old id stop and a new one start, which is honest:
+	// the Frame is now somebody else's to broadcast. What does not change is the UUID on every
+	// piece of salvage in its hands — that is the name that had to survive the move, and the
+	// reason the two identities are separate fields rather than one.
+	snprintf(sql, sizeof sql, "UPDATE spark SET wire = %u, owner = %u WHERE id = %d",
+	         wire_id(to->ward_no, WIRE_SPARK_BASE + (uint32_t)s.id),
+	         class_owner(CLASS_SPARK, to->ward_no), s.id);
+	if (run(s.db, sql)) return 1;
+
 	for (int i = idx; i + 1 < from->nsparks; i++) from->sparks[i] = from->sparks[i + 1];
 	from->nsparks--;
 	to->sparks[to->nsparks++] = s;
@@ -687,6 +820,54 @@ static int honest_across(gyre_t *w, int n, const char *when) {
 		return 1;
 	}
 	return 0;
+}
+
+// Every wire name in the game, gathered so they can be compared. `UNIQUE` on the column
+// already holds each ward to its own names; what no ward can see is the other wards.
+static int gather_wires(gyre_t *g, uint32_t *out, int cap, int n) {
+	static const char *const FROM[] = {"SELECT wire FROM venue", "SELECT wire FROM board"};
+	for (int q = 0; q < 2; q++) {
+		sqlite3_stmt *st;
+		if (sqlite3_prepare_v2(g->ward, FROM[q], -1, &st, NULL) != SQLITE_OK) return -1;
+		while (sqlite3_step(st) == SQLITE_ROW && n < cap)
+			out[n++] = (uint32_t)sqlite3_column_int64(st, 0);
+		sqlite3_finalize(st);
+	}
+	for (int i = 0; i < g->nsparks && n < cap; i++)
+		out[n++] = (uint32_t)scalar(g->sparks[i].db, "SELECT wire FROM spark");
+	return n;
+}
+
+static int by_wire(const void *a, const void *b) {
+	const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
+	return (x > y) - (x < y);
+}
+
+// No two wards may hand out the same wire name. This is the claim the composite scheme makes,
+// and the one a range reservation could not keep: `(ward << 20) | local` is exact, so a duplicate
+// here would mean a local part had escaped its range rather than that a hash got unlucky.
+static int named_apart(gyre_t *w, int nwards) {
+	enum { CAP = 8192 };
+	uint32_t *all = malloc(CAP * sizeof *all);
+	int n = 0, rc = 1;
+	if (!all) return 1;
+
+	for (int i = 0; i < nwards; i++) {
+		n = gather_wires(&w[i], all, CAP, n);
+		if (n < 0) goto done;
+	}
+	qsort(all, (size_t)n, sizeof *all, by_wire);
+	for (int i = 1; i < n; i++) {
+		if (all[i] == all[i - 1]) {
+			printf("BROKEN: two entities in the game answer to wire id %u\n", all[i]);
+			goto done;
+		}
+	}
+	printf("  %d entities across %d wards, and no two share a name\n", n, nwards);
+	rc = 0;
+done:
+	free(all);
+	return rc;
 }
 
 static int play(const char *prefix, int cycles, int nsparks, uint64_t seed, gyre_t *out) {
@@ -755,11 +936,15 @@ static int shard(int cycles, int nsparks, uint64_t seed) {
 			}
 			printf("  cycle %d: Spark %d moved to ward 1, carrying %d\n", c, who, carried);
 			if (honest_across(w, nwards, "a migration")) goto done;
+			// The moment the names are most likely to collide: one Spark is now held by a
+			// ward that never founded it.
+			if (named_apart(w, nwards)) goto done;
 		}
 	}
 
 	for (int i = 0; i < nwards; i++) chronicle(&w[i]);
 	rc = honest_across(w, nwards, "the end");
+	if (rc == 0) rc = named_apart(w, nwards);
 	if (rc == 0) printf("\n  every ward is honest, and so is the game they add up to\n");
 
 done:
