@@ -58,4 +58,25 @@ echo "$out"
 echo "$out" | grep -q "venues: .*Tavern" || {
   echo "the Queen never commissioned anything in 150 cycles"; exit 1; }
 
+# A game too large for one subscriber's slice. 60 Sparks is two wards, and the run moves one
+# Spark between them halfway through. The sum has to hold across both wards, which is the
+# part a migration is able to break.
+step "A game of two wards, and a Spark that moves between them"
+set +e
+out=$(/build/queen shard 40 31337 60 2>&1); rc=$?
+set -e
+echo "$out"
+[ "$rc" -eq 0 ] || { echo "the shard run exited $rc"; exit 1; }
+echo "$out" | grep -q "moved to ward 1" || {
+  echo "no Spark migrated, so the shard run proved nothing"; exit 1; }
+echo "$out" | grep -q "every ward is honest" || {
+  echo "the wards did not add up"; exit 1; }
+
+# One ward may not exceed the slice budget by itself. The refusal is the feature.
+step "One ward refuses to exceed a slice"
+if /build/queen play 5 1 60 2>/dev/null; then
+  echo "a 60-Spark ward was allowed, and its venues would fall out of every slice"; exit 1
+fi
+echo "  refused, as it should"
+
 printf '\n\033[1;32m== ci passed\033[0m\n'

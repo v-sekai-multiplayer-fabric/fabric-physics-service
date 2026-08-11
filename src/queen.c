@@ -160,6 +160,7 @@ typedef struct {
 	int treasury;
 	int debt;
 	int issued;  // every scrip that ever existed
+	int found;   // every piece of salvage this ward accounts for
 	int retired; // every scrip paid to the Debt Clock
 	int spent;   // every scrip paid out of the ward for a venue
 	int next_item;
@@ -223,7 +224,9 @@ static sqlite3 *open_db(const char *name) {
 
 // ── Founding ──────────────────────────────────────────────────────────────────
 
-static int found_ward(gyre_t *g, const char *prefix, int nsparks, uint64_t seed) {
+// `base` is the id of this ward's first Spark. A Spark keeps its id when it migrates, so the
+// ids have to be unique across every ward of the game rather than only inside one.
+static int found_ward(gyre_t *g, const char *prefix, int nsparks, uint64_t seed, int base) {
 	char name[128], sql[512];
 
 	snprintf(name, sizeof name, "%s-ward.db", prefix);
@@ -262,7 +265,11 @@ static int found_ward(gyre_t *g, const char *prefix, int nsparks, uint64_t seed)
 	g->issued = g->treasury;
 	g->retired = 0;
 	g->cycle = 0;
-	g->next_item = 1;
+	g->found = 0;
+	// Item ids are unique across the whole game, not only inside one ward. A Spark carries its
+	// salvage when it migrates, and `held` keys on the item, so two wards that both started
+	// counting at 1 would collide the first time a traveller found something twice.
+	g->next_item = base * 100000 + 1;
 	rng_seed(&g->rng, seed);
 
 	snprintf(sql, sizeof sql, "INSERT INTO ward VALUES (0, %d, %d, %d, 0)", g->treasury,
@@ -271,12 +278,13 @@ static int found_ward(gyre_t *g, const char *prefix, int nsparks, uint64_t seed)
 
 	g->nsparks = nsparks > MAX_SPARKS ? MAX_SPARKS : nsparks;
 	for (int i = 0; i < g->nsparks; i++) {
-		snprintf(name, sizeof name, "%s-spark-%d.db", prefix, i);
+		const int id = base + i;
+		snprintf(name, sizeof name, "%s-spark-%d.db", prefix, id);
 		spark_t *s = &g->sparks[i];
-		s->id = i;
+		s->id = id;
 		s->purse = 0;
 		s->wear = 0;
-		s->at = spark_home(i);
+		s->at = spark_home(id);
 		if (!(s->db = open_db(name))) return 1;
 		if (run(s->db, "DROP TABLE IF EXISTS spark; DROP TABLE IF EXISTS held;")) return 1;
 		if (run(s->db, "CREATE TABLE spark(id INT PRIMARY KEY, purse INT, wear INT, cycles INT,"
@@ -285,7 +293,7 @@ static int found_ward(gyre_t *g, const char *prefix, int nsparks, uint64_t seed)
 			return 1;
 		snprintf(sql, sizeof sql,
 		         "INSERT INTO spark VALUES (%d, 0, 0, 0, %" PRId64 ", %" PRId64 ", %" PRId64 ")",
-		         i, s->at.x, s->at.y, s->at.z);
+		         id, s->at.x, s->at.y, s->at.z);
 		if (run(s->db, sql)) return 1;
 	}
 	return 0;
@@ -478,6 +486,7 @@ static int cycle(gyre_t *g) {
 			g->treasury += earned;
 			g->issued += earned;
 			item = g->next_item++;
+			g->found++;
 			snprintf(sql, sizeof sql,
 			         "INSERT INTO ledger(cycle, what, amount, spark) VALUES (%d,'salvage',%d,%d)",
 			         g->cycle, earned, s->id);
@@ -571,9 +580,8 @@ static int honest(gyre_t *g, const char *when) {
 	// Salvage is unique. An item in two purses is a page that committed twice.
 	int items = 0;
 	for (int i = 0; i < g->nsparks; i++) items += scalar(g->sparks[i].db, "SELECT count(*) FROM held");
-	if (items > g->next_item - 1) {
-		printf("BROKEN at %s: %d items held, only %d ever found\n", when, items,
-		       g->next_item - 1);
+	if (items > g->found) {
+		printf("BROKEN at %s: %d items held, only %d ever found\n", when, items, g->found);
 		return 1;
 	}
 	return 0;
@@ -616,10 +624,75 @@ static unsigned long long fingerprint(gyre_t *g) {
 	return h;
 }
 
+// ── More than one ward ────────────────────────────────────────────────────────
+//
+// A ward holds SPARKS_PER_WARD Sparks, because that is what one subscriber's slice can carry
+// alongside the venues, the Queen and the board. A game larger than that is more than one
+// ward, each its own service on its own machine, and FoundationDB underneath them all.
+//
+// The join costs nothing to arrange. A Spark is its own database whose pages are in
+// FoundationDB, so the receiving ward opens it with no copy and no restore, which is the
+// property `thirdparty/store-plane/prove_handoff.c` exists to prove. What a migration has to
+// get right is the accounting, not the bytes.
+
+// Move a Spark, and the record of its scrip, from one ward to another.
+//
+// The purse travels with the Spark, so the wards' books have to travel with it too. Ward A
+// issued that scrip and no longer holds it; ward B holds it and never issued it. Moving
+// `issued` by the same amount is what keeps each ward's own sum true, and it is the whole
+// difference between a migration and a scrip printer.
+static int migrate(gyre_t *from, gyre_t *to, int idx) {
+	char sql[256];
+	if (idx < 0 || idx >= from->nsparks) return 1;
+	if (to->nsparks >= MAX_SPARKS) return 1;
+
+	spark_t s = from->sparks[idx];
+
+	from->issued -= s.purse;
+	to->issued += s.purse;
+
+	// The salvage in their hands moves with them, so the count of what each ward accounts for
+	// has to move as well. Ward A found these and no longer holds them; ward B holds them and
+	// never found them.
+	const int carried_items = scalar(s.db, "SELECT count(*) FROM held");
+	from->found -= carried_items;
+	to->found += carried_items;
+
+	snprintf(sql, sizeof sql,
+	         "INSERT INTO ledger(cycle, what, amount, spark) VALUES (%d, 'departed', %d, %d)",
+	         from->cycle, -s.purse, s.id);
+	if (run(from->ward, sql)) return 1;
+	snprintf(sql, sizeof sql,
+	         "INSERT INTO ledger(cycle, what, amount, spark) VALUES (%d, 'arrived', %d, %d)",
+	         to->cycle, s.purse, s.id);
+	if (run(to->ward, sql)) return 1;
+
+	for (int i = idx; i + 1 < from->nsparks; i++) from->sparks[i] = from->sparks[i + 1];
+	from->nsparks--;
+	to->sparks[to->nsparks++] = s;
+	return 0;
+}
+
+// Conservation across every ward at once. Each ward already checks its own books inside every
+// cycle. This is the sum a player can never compute, because a player sees one interest slice
+// and this needs all of them.
+static int honest_across(gyre_t *w, int n, const char *when) {
+	long long held = 0, issued = 0;
+	for (int i = 0; i < n; i++) {
+		held += w[i].treasury + purses(&w[i]) + w[i].retired + w[i].spent;
+		issued += w[i].issued;
+	}
+	if (held != issued) {
+		printf("BROKEN across the game at %s: held %lld, issued %lld\n", when, held, issued);
+		return 1;
+	}
+	return 0;
+}
+
 static int play(const char *prefix, int cycles, int nsparks, uint64_t seed, gyre_t *out) {
 	gyre_t g;
 	memset(&g, 0, sizeof g);
-	if (found_ward(&g, prefix, nsparks, seed)) return 1;
+	if (found_ward(&g, prefix, nsparks, seed, 0)) return 1;
 
 	for (int c = 0; c < cycles; c++) {
 		if (cycle(&g)) {
@@ -635,9 +708,68 @@ static int play(const char *prefix, int cycles, int nsparks, uint64_t seed, gyre
 	return 0;
 }
 
+#define MAX_WARDS 8
+
+// Play a game too large for one ward. Found as many wards as it takes, split the Sparks
+// between them, and run them together. Halfway through, move a Spark from the first ward to
+// the second, because a game that shards and cannot migrate has only moved the problem.
+static int shard(int cycles, int nsparks, uint64_t seed) {
+	const int nwards = (nsparks + SPARKS_PER_WARD - 1) / SPARKS_PER_WARD;
+	gyre_t w[MAX_WARDS];
+	int rc = 1;
+
+	if (nwards > MAX_WARDS) {
+		fprintf(stderr, "%d Sparks wants %d wards, and this build holds %d\n", nsparks, nwards,
+		        MAX_WARDS);
+		return 2;
+	}
+	memset(w, 0, sizeof w);
+
+	for (int i = 0, placed = 0; i < nwards; i++) {
+		char prefix[32];
+		int take = nsparks - placed;
+		if (take > SPARKS_PER_WARD) take = SPARKS_PER_WARD;
+		snprintf(prefix, sizeof prefix, "gyre-shard-%d", i);
+		// A seed of its own, so two wards do not play the same cycle twice over.
+		if (found_ward(&w[i], prefix, take, seed + (uint64_t)i, placed)) return 1;
+		placed += take;
+	}
+	printf("\n  %d Sparks across %d wards, %d to a ward\n", nsparks, nwards, SPARKS_PER_WARD);
+
+	for (int c = 0; c < cycles; c++) {
+		for (int i = 0; i < nwards; i++) {
+			if (cycle(&w[i])) goto done;
+			if (honest(&w[i], "a cycle")) goto done;
+		}
+		if (honest_across(w, nwards, "a cycle")) goto done;
+
+		// The migration, at the midpoint. The Spark's database is not copied: ward 1 already
+		// reaches the same pages through FoundationDB. What moves is the authority over it,
+		// and the scrip it is carrying.
+		if (nwards > 1 && c == cycles / 2) {
+			const int who = w[0].sparks[0].id;
+			const int carried = w[0].sparks[0].purse;
+			if (migrate(&w[0], &w[1], 0)) {
+				printf("  the Spark could not move\n");
+				goto done;
+			}
+			printf("  cycle %d: Spark %d moved to ward 1, carrying %d\n", c, who, carried);
+			if (honest_across(w, nwards, "a migration")) goto done;
+		}
+	}
+
+	for (int i = 0; i < nwards; i++) chronicle(&w[i]);
+	rc = honest_across(w, nwards, "the end");
+	if (rc == 0) printf("\n  every ward is honest, and so is the game they add up to\n");
+
+done:
+	for (int i = 0; i < nwards; i++) close_ward(&w[i]);
+	return rc;
+}
+
 int main(int argc, char **argv) {
 	if (argc < 3) {
-		fprintf(stderr, "usage: queen play|check <cycles> [seed] [sparks]\n");
+		fprintf(stderr, "usage: queen play|check|shard <cycles> [seed] [sparks]\n");
 		return 2;
 	}
 	const char *mode = argv[1];
@@ -650,11 +782,11 @@ int main(int argc, char **argv) {
 	// rather than a bigger slice: the pages are already shared, so a Spark moves between wards
 	// with no copy and no restore. Refusing here is the point. A ward that quietly exceeded
 	// the budget would drop its venues out of every slice and look healthy doing it.
-	if (nsparks > SPARKS_PER_WARD) {
+	if (strcmp(mode, "shard") != 0 && nsparks > SPARKS_PER_WARD) {
 		fprintf(stderr,
 		        "%d Sparks is more than one ward may hold. A subscriber's slice is %d"
 		        " entities, and %d of those are the venues, the Queen and a full board,"
-		        " so a ward holds %d Sparks. Found a second ward and migrate the rest.\n",
+		        " so a ward holds %d Sparks. Run `queen shard` instead.\n",
 		        nsparks, SLICE_ENTITIES, FIXED_ENTITIES, SPARKS_PER_WARD);
 		return 2;
 	}
@@ -664,6 +796,8 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 	weft_vfs_register(1);
+
+	if (strcmp(mode, "shard") == 0) return shard(cycles, nsparks, seed);
 
 	gyre_t a;
 	memset(&a, 0, sizeof a);
