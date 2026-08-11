@@ -667,6 +667,20 @@ static void close_ward(gyre_t *g) {
 	sqlite3_close(g->ward);
 }
 
+// Every name in a Spark's hands, folded into the running hash. `ORDER BY item` so the digest
+// is over the set rather than over whatever order the rows came back in.
+static unsigned long long fold_held(sqlite3 *db, unsigned long long h) {
+	sqlite3_stmt *st;
+	if (sqlite3_prepare_v2(db, "SELECT item FROM held ORDER BY item", -1, &st, NULL) != SQLITE_OK)
+		return h;
+	while (sqlite3_step(st) == SQLITE_ROW) {
+		const unsigned char *name = sqlite3_column_text(st, 0);
+		for (const unsigned char *p = name; p && *p; p++) h = (h ^ *p) * 1099511628211ULL;
+	}
+	sqlite3_finalize(st);
+	return h;
+}
+
 // A number that stands for the whole ward, so two runs can be compared in one line.
 static unsigned long long fingerprint(gyre_t *g) {
 	unsigned long long h = 1469598103934665603ULL;
@@ -680,6 +694,10 @@ static unsigned long long fingerprint(gyre_t *g) {
 		h = (h ^ (unsigned long long)g->sparks[i].at.x) * 1099511628211ULL;
 		h = (h ^ (unsigned long long)g->sparks[i].at.y) * 1099511628211ULL;
 		h = (h ^ (unsigned long long)g->sparks[i].at.z) * 1099511628211ULL;
+		// And what is in their hands. A name is state the same as a purse is, so the replay
+		// check has to cover it: `uuid8` draws nothing from the RNG, and a derivation that
+		// silently stopped being deterministic would otherwise leave every number matching.
+		h = fold_held(g->sparks[i].db, h);
 	}
 	return h;
 }
