@@ -1,0 +1,33 @@
+# CI, on this machine, in one step:
+#
+#   docker compose run --rm ci
+#
+# The job in .github/workflows/ci.yml needs an Ubuntu toolchain and a FoundationDB cluster,
+# which is not what a developer's machine is — least of all a Windows one. So the machine
+# lends a container the repository and nothing else, and the container is the same
+# ubuntu-24.04 with the same FDB. The debs live in a named volume, so the second run is
+# build-and-play only.
+#
+# `docker compose run --rm shell` is the same container with the cluster up and a prompt.
+services:
+  ci: &ci
+    image: ubuntu:24.04
+    working_dir: /repo
+    environment:
+      FDB_VERSION: "7.3.76"
+      WEFT_FDB_CLUSTER_FILE: /etc/foundationdb/fdb.cluster
+      CI_MODE: play
+    volumes:
+      - .:/repo
+      - fdb-debs:/root/fdb-debs
+    command: ["bash", "/repo/ci/inside.sh"]
+
+  shell:
+    <<: *ci
+    environment:
+      FDB_VERSION: "7.3.76"
+      WEFT_FDB_CLUSTER_FILE: /etc/foundationdb/fdb.cluster
+      CI_MODE: shell
+
+volumes:
+  fdb-debs:
