@@ -71,6 +71,8 @@ echo "$out" | grep -q "moved to ward 1" || {
   echo "no Spark migrated, so the shard run proved nothing"; exit 1; }
 echo "$out" | grep -q "every ward is honest" || {
   echo "the wards did not add up"; exit 1; }
+echo "$out" | grep -q "no two share a name" || {
+  echo "two wards gave out the same wire id, or nobody checked"; exit 1; }
 
 # One ward may not exceed the slice budget by itself. The refusal is the feature.
 step "One ward refuses to exceed a slice"
