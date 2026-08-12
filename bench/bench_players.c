@@ -2,7 +2,7 @@
 //
 //   bench_players [--players N | --ramp] [--cubes 900] [--per-player 3]
 //                 [--sim-hz 60] [--publish-hz 20] [--ticks 100] [--core 0]
-//                 [--interest 10] [--gate] [--log docs/logbook/one_core.md]
+//                 [--interest 10] [--stack 0] [--gate] [--log docs/logbook/one_core.md]
 //
 // The question is `fabric-service-meta#4`'s: 1800 entities, twenty snapshots a second, one core
 // — how many people is that? Every number it rests on is asserted somewhere in this repository
@@ -223,8 +223,8 @@ typedef struct {
 	int ok;
 } result_t;
 
-static int run_at(int players, int cubes, int per_player, double sim_hz, double publish_hz,
-                  int ticks, double interest_m, result_t *out) {
+static int run_at(int players, int cubes, int stack, int per_player, double sim_hz,
+                  double publish_hz, int ticks, double interest_m, result_t *out) {
 	mj_physics_t phys;
 	char error[1024] = {0};
 	char *scene;
@@ -248,7 +248,7 @@ static int run_at(int players, int cubes, int per_player, double sim_hz, double 
 	r.interest_um = (int64_t)llround(interest_m * 1000000.0);
 	out->entities = r.entities;
 
-	scene = gaffer_scene(players, cubes, timestep);
+	scene = gaffer_scene(players, cubes, stack, timestep);
 	if (!scene) {
 		fprintf(stderr, "cannot build a scene of %d players and %d cubes\n", players, cubes);
 		return 0;
@@ -261,8 +261,8 @@ static int run_at(int players, int cubes, int per_player, double sim_hz, double 
 	free(scene);
 
 	if (phys.model->nbody - 1 != r.entities) {
-		fprintf(stderr, "the scene has %d bodies, not the %d asked for\n", phys.model->nbody - 1,
-		        r.entities);
+		fprintf(stderr, "the scene has %lld bodies, not the %d asked for\n",
+		        (long long)(phys.model->nbody - 1), r.entities);
 		mj_physics_close(&phys);
 		return 0;
 	}
@@ -388,6 +388,11 @@ static void report(int players, int cubes, int per_player, const result_t *res, 
 int main(int argc, char **argv) {
 	int per_player = AVATAR_ENTITIES, players = 0, cubes = 900, ticks = 100, core = 0, ramp = 0;
 	int gate = 0;
+	// How many cubes high. A flat field is a zone nobody has played in; the article's players
+	// build towers, and a tower is a coupled chain of contacts the solver carries every step.
+	// Timing only the field understates the simulate stage for every topology at once, which is
+	// worse than understating one — it makes the comparison look fair while all are flattered.
+	int stack = 0;
 	const char *logbook = NULL;
 	double sim_hz = 60.0, publish_hz = 20.0;
 	// How far a subscriber cares, in metres. Room scale plus reach: the article's players are
@@ -406,6 +411,7 @@ int main(int argc, char **argv) {
 		else if (!strcmp(argv[i], "--per-player")) per_player = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--players")) players = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--cubes")) cubes = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--stack")) stack = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--ticks")) ticks = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--core")) core = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--sim-hz")) sim_hz = atof(argv[++i]);
@@ -414,7 +420,7 @@ int main(int argc, char **argv) {
 		else if (!strcmp(argv[i], "--log")) logbook = argv[++i];
 		else { fprintf(stderr, "no such option: %s\n", argv[i]); return 2; }
 	}
-	if (per_player < 1 || players < 0 || cubes < 0 || ticks < 10 || sim_hz < publish_hz ||
+	if (per_player < 1 || players < 0 || cubes < 0 || stack < 0 || ticks < 10 || sim_hz < publish_hz ||
 	    interest_m <= 0) {
 		fprintf(stderr, "those arguments do not make a run\n");
 		return 2;
@@ -435,7 +441,7 @@ int main(int argc, char **argv) {
 
 	if (!ramp) {
 		if (players == 0) players = room;
-		if (!run_at(players, cubes, per_player, sim_hz, publish_hz, ticks, interest_m, &r))
+		if (!run_at(players, cubes, stack, per_player, sim_hz, publish_hz, ticks, interest_m, &r))
 			return 1;
 		report(players, cubes, per_player, &r, budget_ms, publish_hz);
 		if (logbook)
@@ -455,7 +461,7 @@ int main(int argc, char **argv) {
 
 		memset(&last, 0, sizeof last);
 		for (int n = 1; n <= room; n++) {
-			if (!run_at(n, cubes, per_player, sim_hz, publish_hz, ticks, interest_m, &r))
+			if (!run_at(n, cubes, stack, per_player, sim_hz, publish_hz, ticks, interest_m, &r))
 				return 1;
 			printf("  %3d players  %6.2f ms median  %6.2f worst  (sim %5.2f enc %5.2f sli %5.2f)"
 			       "  contacts %d\n",

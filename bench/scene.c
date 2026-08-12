@@ -47,13 +47,14 @@ static void say(out_t *o, const char *fmt, ...) {
 	o->n += (size_t)n;
 }
 
-char *gaffer_scene(int players, int cubes, double timestep) {
+char *gaffer_scene(int players, int cubes, int stack, double timestep) {
 	out_t o;
 	size_t cap;
 	int entities = cubes + players * AVATAR_ENTITIES;
 	int side;
+	int towers;
 
-	if (players < 0 || cubes < 0 || entities < 1 || timestep <= 0) return NULL;
+	if (players < 0 || cubes < 0 || stack < 0 || entities < 1 || timestep <= 0) return NULL;
 
 	// About 200 bytes a body, and MJCF is the only thing written here, so one generous slab is
 	// cheaper than growing one.
@@ -68,17 +69,35 @@ char *gaffer_scene(int players, int cubes, double timestep) {
 	say(&o, "<worldbody>");
 	say(&o, "<geom name=\"floor\" type=\"plane\" size=\"200 200 0.1\"/>");
 
-	// A field rather than a tower. The article's stacks are what a player builds during a
-	// session, and a scene that starts as a twenty-metre stack measures the solver holding one
-	// up — which is a real cost, but not the one a zone pays for most of its life. Cubes start
-	// settled and apart, and the run stirs them.
+	// A field, or towers.
+	//
+	// `stack` 0 is the flat field: every cube touches the floor and nothing else, which is what a
+	// zone looks like before anybody has played in it. It is the cheap case and, being cheap, the
+	// one that flatters both the solver and determinism.
+	//
+	// Anything above 1 is what the article's players actually build — "huge stacks of cubes, up to
+	// 20 or 30 meters high". A tower is a chain of contacts the solver has to keep upright every
+	// step, and the constraint it solves is coupled all the way down: a cube at the bottom feels
+	// the fifty above it. That is a different order of work from a grid, and measuring only the
+	// grid understates the simulate stage of every topology equally, which is worse than
+	// understating one — it makes the comparison look fair while all three are flattered.
+	//
+	// Towers are laid on the same grid, spaced by the cube's own width plus a margin so that
+	// neighbouring towers can lean without starting interpenetrated.
+	towers = stack > 1 ? (cubes + stack - 1) / stack : (cubes > 0 ? cubes : 1);
 	side = 1;
-	while (side * side < (cubes > 0 ? cubes : 1)) side++;
+	while (side * side < towers) side++;
 	for (int i = 0; i < cubes; i++) {
-		int col = i % side, row = i / side; // a grid index, so the division is meant to truncate
+		int t = stack > 1 ? i / stack : i;          // which tower
+		int level = stack > 1 ? i % stack : 0;      // how far up it
+		int col = t % side, row = t / side;
 		double x = col * 0.6 - side * 0.3, y = row * 0.6 - side * 0.3;
+		// A hair of gap per level rather than exact contact. Cubes spawned touching are cubes
+		// spawned interpenetrating once the solver rounds, and a run that begins by pushing a
+		// tower apart measures the recovery rather than the stack.
+		double z = 0.3 + level * (CUBE_METRES + 0.002);
 
-		say(&o, "<body name=\"c%d\" pos=\"%g %g 0.3\"><freejoint/>", i, x, y);
+		say(&o, "<body name=\"c%d\" pos=\"%g %g %g\"><freejoint/>", i, x, y, z);
 		say(&o, "<geom type=\"box\" size=\"0.2 0.2 0.2\" mass=\"1\"/></body>");
 	}
 

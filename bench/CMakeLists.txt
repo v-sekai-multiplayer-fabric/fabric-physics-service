@@ -61,10 +61,17 @@ if(MSVC)
   target_compile_definitions(determinism_probe PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 
+# Both of these open the logbook or a trace with `fopen`, which is standard C that MSVC
+# deprecates in favour of `_s` variants that exist nowhere else. Taking the warning at its word
+# would make these files Windows-only in order to silence a warning about portability.
+
 add_executable(bench_players bench_players.c scene.c)
 target_include_directories(bench_players PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR} ${PHYSICS_ROOT}/src)
 target_link_libraries(bench_players PRIVATE mj_physics fanout_edge)
+if(MSVC)
+  target_compile_definitions(bench_players PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
 
 # The one MuJoCo test `mujoco-riscv64` carried, which its own README says was never built or run.
 # Building the engine here is what makes running it free, and a test that has never run is not a

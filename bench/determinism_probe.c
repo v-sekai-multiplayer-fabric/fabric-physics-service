@@ -1,7 +1,7 @@
 // Does this simulation replay identically?
 //
-//   determinism_probe [--cubes 900] [--players 4] [--ticks 1200] [--sim-hz 60]
-//                     [--publish-hz 20] [--emit <file>] [--compare <file>]
+//   determinism_probe [--cubes 900] [--stack 0] [--players 4] [--ticks 1200]
+//                     [--sim-hz 60] [--publish-hz 20] [--emit <file>] [--compare <file>]
 //
 // Deterministic lockstep sends intent and nothing else, and every peer arrives at the same
 // world by simulating it. That only works if the same inputs produce the same state — bit for
@@ -79,12 +79,17 @@ static double worst_gap(const mjtNum *a, const mjtNum *b, mjtSize n, mjtSize *at
 
 int main(int argc, char **argv) {
 	int cubes = 900, players = 4, ticks = 1200;
+	// How many cubes high to pile them. Zero is the flat field a zone starts as; the article's
+	// players build towers, and a tower is a coupled chain of contacts rather than one contact
+	// with the floor. The hard case is the one worth asking determinism about.
+	int stack = 0;
 	double sim_hz = 60.0, publish_hz = 20.0;
 	const char *emit_path = NULL, *compare_path = NULL;
 
 	for (int i = 1; i < argc; i++) {
 		if (i + 1 >= argc) { fprintf(stderr, "%s wants a value\n", argv[i]); return 2; }
 		else if (!strcmp(argv[i], "--cubes")) cubes = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--stack")) stack = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--players")) players = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--ticks")) ticks = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--sim-hz")) sim_hz = atof(argv[++i]);
@@ -93,7 +98,7 @@ int main(int argc, char **argv) {
 		else if (!strcmp(argv[i], "--compare")) compare_path = argv[++i];
 		else { fprintf(stderr, "no such option: %s\n", argv[i]); return 2; }
 	}
-	if (cubes < 0 || players < 0 || ticks < 1 || sim_hz < publish_hz) {
+	if (cubes < 0 || players < 0 || stack < 0 || ticks < 1 || sim_hz < publish_hz) {
 		fprintf(stderr, "those arguments do not make a run\n");
 		return 2;
 	}
@@ -104,7 +109,7 @@ int main(int argc, char **argv) {
 	// Two worlds from one scene string. Same text, so any difference is the simulation's and not
 	// the generator's — building the MJCF twice would also test the generator, which is a
 	// separate question and would muddy this one.
-	char *scene = gaffer_scene(players, cubes, timestep);
+	char *scene = gaffer_scene(players, cubes, stack, timestep);
 	if (!scene) {
 		fprintf(stderr, "cannot build a scene of %d players and %d cubes\n", players, cubes);
 		return 1;
@@ -211,7 +216,7 @@ int main(int argc, char **argv) {
 		// run to have kept every one of them in memory.
 		mj_physics_close(&a);
 		mj_physics_close(&b);
-		char *again = gaffer_scene(players, cubes, timestep);
+		char *again = gaffer_scene(players, cubes, stack, timestep);
 		mj_physics_init(&a, again, err, sizeof err);
 		free(again);
 		memcpy(home_a, a.data->mocap_pos, (size_t)a.model->nmocap * 3 * sizeof(double));

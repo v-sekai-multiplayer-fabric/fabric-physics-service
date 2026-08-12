@@ -29,11 +29,11 @@ article.
 
 Three shapes, sixty ticks each.
 
-| players | cubes | entities | median | of budget | simulate | encode | fanout |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4 | 900 | 912 | 21.12 ms | 42% | 20.83 | 0.04 | 0.01 |
-| 166 | 900 | 1398 | 20.53 ms | 41% | 19.59 | 0.06 | 0.45 |
-| 466 | 0 | 1398 | 3.98 ms | 8% | 1.04 | 0.04 | 3.02 |
+| players | cubes | entities |   median | of budget | simulate | encode | fanout |
+| ------: | ----: | -------: | -------: | --------: | -------: | -----: | -----: |
+|       4 |   900 |      912 | 21.12 ms |       42% |    20.83 |   0.04 |   0.01 |
+|     166 |   900 |     1398 | 20.53 ms |       41% |    19.59 |   0.06 |   0.45 |
+|     466 |     0 |     1398 |  3.98 ms |        8% |     1.04 |   0.04 |   3.02 |
 
 Run to run the cubed medians move by about 2 ms and the worst tick by much more — 58 ms in one
 of the four-player runs, which is over budget on its own. That spread is a desktop with a
@@ -95,13 +95,13 @@ anything was built on the answer.
 `bench/determinism_probe.c`, two worlds from one MJCF string, driven by an input that is a pure
 function of the tick, compared with `mj_getState(..., mjSTATE_INTEGRATION)` every tick.
 
-| shape | entities | ticks | result |
-| --- | ---: | ---: | --- |
-| 900 cubes, 4 players, one process | 912 | 1200 | identical |
-| 900 cubes, 4 players, **two processes** | 912 | 1200 | traces agree |
-| 900 cubes, 166 players, a full ward | 1398 | 600 | identical |
-| 466 players, no cubes — no contacts at all | 1398 | 600 | identical |
-| 1400 cubes, no players — maximum contacts | 1400 | 600 | identical |
+| shape                                      | entities | ticks | result       |
+| ------------------------------------------ | -------: | ----: | ------------ |
+| 900 cubes, 4 players, one process          |      912 |  1200 | identical    |
+| 900 cubes, 4 players, **two processes**    |      912 |  1200 | traces agree |
+| 900 cubes, 166 players, a full ward        |     1398 |   600 | identical    |
+| 466 players, no cubes — no contacts at all |     1398 |   600 | identical    |
+| 1400 cubes, no players — maximum contacts  |     1400 |   600 | identical    |
 
 The state is 28063 `mjtNum` at 912 entities, 224504 bytes, and every byte matched.
 
@@ -130,8 +130,56 @@ run at a rate it can hit.
   not have been seen.
 - No threading. MuJoCo is stepped on one thread here; `mj_step` with a thread pool reassociates
   floating-point work and is a separate question.
-- Reproducible is not the same as *agreeing with another implementation*. Nothing here says a
+- Reproducible is not the same as _agreeing with another implementation_. Nothing here says a
   second physics engine, or a headset build with different flags, computes the same world.
+
+## 2026-08-12: a stack is a different problem, and the field was flattering us
+
+The entry above ends by saying the 900 cubes are a settled grid rather than the article's
+twenty-metre stacks, and that a stack would cost more. It costs enormously more, and the shape
+of the cost is not what "more" suggests.
+
+`bench_players --stack 50` builds eighteen towers fifty cubes high — twenty metres, which is the
+article's own figure. Same 900 cubes, same four players, same everything else.
+
+| ticks run | median | worst | simulate | contacts at the end |
+| ---: | ---: | ---: | ---: | ---: |
+| 12 | 20.72 ms | 51.26 ms | 23.55 | 3356 |
+| 40 | 17.80 ms | 226.56 ms | 45.90 | 718 |
+| 100 | **89.61 ms** | **1840.56 ms** | 320.19 | 3311 |
+
+**A standing tower is cheap and a falling one is not.** At twelve ticks the stacked scene is
+indistinguishable from the flat field — 20.7 ms against 20.5 — because nothing has moved yet.
+By a hundred ticks the median is 89.61 ms, over the 50 ms budget on its own, and one tick took
+**1840.56 ms**. That is thirty-seven times the budget in a single tick.
+
+The first sign of this was a run that looked hung. The determinism probe at `--stack 50` was
+killed after nine minutes; it was not stuck, it was simulating two collapsing worlds at seconds
+per tick. A measurement that looks like a hang is worth a second look before it is called one.
+
+### What it does to the number above
+
+**The 166-player result is a number about an empty room.** It was measured on a settled grid,
+and a settled grid is what a zone looks like before anybody plays in it. The moment a player
+knocks a tower over, this core misses its tick by a factor of thirty-seven, and no topology
+choice changes that: lockstep, authority and relay all have to integrate the same collapse, and
+in lockstep *every peer* does.
+
+The entry stands rather than being edited, because it is true about what it measured. It is the
+scope that was wrong, not the arithmetic.
+
+### What it means for the comparison
+
+Contacts are not a property of the scene, they are a property of the moment. 3356, then 718,
+then 3311 as the towers fall and settle — so a single tick count is not a benchmark of anything
+and the three topologies must be compared over the same interval of the same collapse, not at
+whatever tick each run happened to stop.
+
+It also makes the interesting question a different one. "How many players fit" assumed the cost
+was steady. What a zone actually needs to survive is the worst tick, and the worst tick here is
+two seconds — so the next thing worth measuring is not a bigger ceiling but what a zone does
+when one tick takes two seconds, which every topology must answer and none of them answers by
+being faster.
 
 ## Every run, as it was logged
 
@@ -139,8 +187,8 @@ run at a rate it can hit.
 conditions and outcomes; the sections above are what they mean. Rows are never edited or
 removed — a measurement that turned out to be wrong gets a section saying so.
 
-| when | run | players | cubes | per player | entities | sim Hz | pub Hz | interest m | ticks | median ms | worst ms | simulate | encode | fanout | contacts | sent | bytes |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2026-08-12 07:09 | fixed | 4 | 900 | 3 | 912 | 60 | 20 | 10.0 | 60 | 21.12 | 58.47 | 20.83 | 0.04 | 0.01 | 3600 | 256 | 25600 |
-| 2026-08-12 07:09 | fixed | 166 | 900 | 3 | 1398 | 60 | 20 | 10.0 | 60 | 20.53 | 26.96 | 19.59 | 0.06 | 0.45 | 3600 | 10624 | 1062400 |
-| 2026-08-12 07:09 | fixed | 466 | 0 | 3 | 1398 | 60 | 20 | 10.0 | 60 | 3.98 | 5.63 | 1.04 | 0.04 | 3.02 | 0 | 29780 | 2978000 |
+| when             | run   | players | cubes | per player | entities | sim Hz | pub Hz | interest m | ticks | median ms | worst ms | simulate | encode | fanout | contacts |  sent |   bytes |
+| ---------------- | ----- | ------: | ----: | ---------: | -------: | -----: | -----: | ---------: | ----: | --------: | -------: | -------: | -----: | -----: | -------: | ----: | ------: |
+| 2026-08-12 07:09 | fixed |       4 |   900 |          3 |      912 |     60 |     20 |       10.0 |    60 |     21.12 |    58.47 |    20.83 |   0.04 |   0.01 |     3600 |   256 |   25600 |
+| 2026-08-12 07:09 | fixed |     166 |   900 |          3 |     1398 |     60 |     20 |       10.0 |    60 |     20.53 |    26.96 |    19.59 |   0.06 |   0.45 |     3600 | 10624 | 1062400 |
+| 2026-08-12 07:09 | fixed |     466 |     0 |          3 |     1398 |     60 |     20 |       10.0 |    60 |      3.98 |     5.63 |     1.04 |   0.04 |   3.02 |        0 | 29780 | 2978000 |
