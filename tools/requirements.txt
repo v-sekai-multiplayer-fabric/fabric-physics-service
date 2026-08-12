@@ -1,0 +1,9 @@
+# Rendering only. Deliberately not part of the build: the service simulates and never draws, and
+# `cmake/mujoco.cmake` disables MuJoCo's own viewer for the same reason.
+#
+# `mujoco` is pinned to the version `thirdparty/mujoco-riscv64` vendors. Same version, so what is
+# filmed is what is simulated — a render from a different MuJoCo would be a picture of a
+# different simulation, which is exactly the confusion this tooling exists to remove.
+mujoco==3.11.0
+pillow>=10
+pyyaml>=6
