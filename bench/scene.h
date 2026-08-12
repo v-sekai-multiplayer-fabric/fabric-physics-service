@@ -40,6 +40,24 @@
 // order, so a capped run replays exactly like an uncapped one — but the cap becomes part of the
 // wire contract, like the simulation rate. Two peers solving to different iteration counts are
 // in different worlds, and they diverge in the tick where the cap first bites.
-char *gaffer_scene(int players, int cubes, int stack, int iters, int ls_iters, double timestep);
+// `pile` builds pyramids `pile` layers tall instead of a field or towers, and it exists to fail.
+//
+// It is the reproduction case for the limits work, not a scene to benchmark with. A pyramid
+// stands because every cube rests on others, which is the arrangement with the most contacts
+// there is: measured, 100 cubes make 1345 contacts and run at 0.92x realtime, 400 make 6435 and
+// run at 0.02x. Neither a solver-iteration cap nor MuJoCo's sleep flag moves those numbers.
+//
+// So it is kept deliberately and named so it cannot be reached by accident. Anything that claims
+// to bound the tick — welding settled assemblies, a wall-clock time-box — has to be shown against
+// this, and a bound demonstrated only on the flat field is a bound demonstrated on the easy case.
+//
+// `stack` is the other failure and a different one: a column of `stack` cubes is that aspect
+// ratio to one, and at fifty it does not topple but ejects, throwing its top cube from 19.9 m to
+// 23 m in two seconds. Also kept, for the same reason.
+//
+// The scene to measure with is the flat field, `stack` and `pile` both zero. It holds 4.15x
+// realtime at 900 cubes.
+char *gaffer_scene(int players, int cubes, int stack, int pile, int iters, int ls_iters,
+                   double timestep);
 
 #endif

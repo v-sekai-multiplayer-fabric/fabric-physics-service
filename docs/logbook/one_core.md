@@ -133,6 +133,66 @@ run at a rate it can hit.
 - Reproducible is not the same as _agreeing with another implementation_. Nothing here says a
   second physics engine, or a headset build with different flags, computes the same world.
 
+## 2026-08-12: what a stacked scene costs, and why the answer is not geometry
+
+Left in the open after the entries above: whether the flat field flatters the numbers, since a
+zone that has been played in is not a settled grid. It does, and the correction is larger and in
+a different direction than expected.
+
+Measured, one core, 900 cubes unless stated, wall clock against simulated time:
+
+| scene | realtime | note |
+| --- | ---: | --- |
+| flat field, 900 cubes, 4 players | **4.15×** | comfortably inside the budget |
+| 100 cubes, 6-layer pyramid | 0.92× | 1345 contacts |
+| 200 cubes, 8-layer pyramid | **0.11×** | 3128 contacts |
+| 400 cubes, 10-layer pyramid | **0.02×** | 6435 contacts |
+
+**Stability and speed are opposed.** A pyramid stands because every cube rests on others, which
+is the maximally-contacting arrangement: 100 cubes make 1345 contacts, 400 make 6435. The shape
+that does not fall over is the shape that costs the most.
+
+A column is worse and fails differently. Fifty 0.4 m cubes is an aspect ratio of fifty to one,
+and nothing stands at fifty to one. It does not topple, it ejects — the top cube leaves 19.9 m
+and reaches 23 m within two seconds, with the gap between levels closed to zero.
+
+### The knobs that do not work
+
+- **Solver iterations.** 100 → 20 → 10 → 5 moved the worst tick by noise, and 10 came out worse
+  than 100. There is no solver problem to cap.
+- **Sleeping.** `<flag sleep="enable"/>` takes the reported contact count to zero and changes the
+  run time not at all. That is the informative result: if contacts go to zero and the cost stays,
+  the cost was never in the contact solve. It is in collision detection, which still runs.
+
+Both point the same way, and it is the same way the iteration result pointed. The time is spent
+before the solver.
+
+### So the bound has to be structural
+
+A sandbox takes adversarial input. Whatever shape is chosen here, a player can build the one that
+is worst, so "we picked a stable geometry" is not a defence and neither is any amount of tuning.
+Two mechanisms, and only the second is a guarantee:
+
+- **Weld settled assemblies.** A stack that has not moved for some frames becomes one body, which
+  is what Roblox does and what turns 1345 contacts into a handful. MuJoCo can do it: `mjSpec` and
+  `mj_compile` allow the model to be edited and recompiled at runtime. It is deterministic — the
+  same state welds the same way everywhere — so the weld rule joins the wire contract beside the
+  simulation rate.
+- **Time-box the tick.** Budget the wall clock inside the tick, drop substeps when it is spent,
+  publish anyway. Fidelity degrades and the deadline never does. This is the only bound a player
+  cannot out-build, and the welding above is an optimisation under it rather than a replacement.
+
+### What this does not say
+
+- Every figure is one desktop core, Windows, MSVC, one thread.
+- The pyramid geometry that produced these numbers is not in the tree. It was reverted rather
+  than committed: a scene shape known to miss the budget by fifty times is one somebody would
+  otherwise benchmark with by accident.
+- Nothing here measures welding or a time-box. Both are proposed on the strength of what the
+  knobs above failed to do, not on a measurement of what they achieve.
+- The three-topology comparison does not wait on any of this. It runs on the flat field, which
+  holds 4.15×, and all three topologies integrate whatever the engine ends up costing.
+
 ## Every run, as it was logged
 
 `bench_players --log docs/logbook/one_core.md` appends here. The rows below are the raw
