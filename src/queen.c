@@ -31,6 +31,7 @@
 
 #include "planner.h"
 #include "rng.h"
+#include "wt.h"
 
 #include <sqlite3.h>
 #include <arpa/inet.h>
@@ -1385,12 +1386,43 @@ static int send_reply(int fd, const unsigned char *body, size_t n) {
 	return 0;
 }
 
+// ── The same ward, over WebTransport ──────────────────────────────────────────
+//
+// `wt.c` terminates the transport and hands a whole command here. It is the same
+// `serve_command` the TCP line server calls, against the same ward: two ways in, one writer,
+// and no second copy of the rules. What differs is only the framing, and on WebTransport
+// there is none — the client's FIN ended the command and this reply's FIN ends the answer.
+typedef struct {
+	gyre_t *g;
+} wt_app_t;
+
+static size_t on_wt_command(void *app, const char *line, unsigned char *reply, size_t cap,
+                            int *stop) {
+	wt_app_t *a = (wt_app_t *)app;
+	char buf[LINE_MAX_BYTES];
+
+	// `serve_command` writes NULs into the line to split it, so it gets a copy it may own.
+	snprintf(buf, sizeof buf, "%s", line);
+
+	cbor_t c = {reply, 0, cap, 0};
+	(void)serve_command(a->g, buf, &c, stop);
+	if (c.over) {
+		fprintf(stderr, "the ward does not fit in %zu bytes\n", cap);
+		return 0;
+	}
+	return c.n;
+}
+
 static int serve(int port, int nsparks, uint64_t seed) {
-	struct pollfd fds[MAX_CLIENTS + 1];
+	// Two more than the clients and the listener: the UDP socket and picoquic's own timer.
+	struct pollfd fds[MAX_CLIENTS + 3];
 	client_t cl[MAX_CLIENTS];
 	unsigned char *reply = malloc(REPLY_MAX_BYTES);
 	gyre_t g;
 	int lfd, nc = 0, rc = 1, stop = 0;
+	wt_t *wt = NULL;
+	wt_app_t wt_app;
+	int wt_udp = -1, wt_timer = -1;
 
 	if (!reply) return 1;
 	memset(&g, 0, sizeof g);
@@ -1410,6 +1442,34 @@ static int serve(int port, int nsparks, uint64_t seed) {
 	       (unsigned long long)seed);
 	fflush(stdout);
 
+	// The transport a browser can reach, when it has a certificate to present. picoquic takes
+	// file paths and not PEM buffers, so a deployment that keeps the PEM in a secret writes it
+	// to disk first — `gateway-edge/TRANSPORT.md` records that, and so does `fly/entrypoint.sh`.
+	//
+	// Absent a cert this is the TCP line server alone, and it says so rather than pretending.
+	// That is a missing credential and not a door: the same code path runs either way.
+	{
+		const char *cert = getenv("QUEEN_TLS_CERT"), *key = getenv("QUEEN_TLS_KEY");
+		const char *bind_addr = getenv("QUEEN_WT_BIND");
+		const char *wt_port = getenv("QUEEN_WT_PORT");
+		if (cert && key) {
+			wt_app.g = &g;
+			wt = wt_open(wt_port ? atoi(wt_port) : port + 1, bind_addr, cert, key,
+			             on_wt_command, &wt_app);
+			if (!wt) {
+				fprintf(stderr, "the ward has no WebTransport, and a cert was given\n");
+				close(lfd);
+				close_ward(&g);
+				free(reply);
+				return 1;
+			}
+			wt_fds(wt, &wt_udp, &wt_timer);
+		} else {
+			printf("no QUEEN_TLS_CERT and QUEEN_TLS_KEY, so no WebTransport: TCP only\n");
+			fflush(stdout);
+		}
+	}
+
 	while (!stop) {
 		fds[0].fd = lfd;
 		fds[0].events = POLLIN;
@@ -1421,7 +1481,23 @@ static int serve(int port, int nsparks, uint64_t seed) {
 		// seat by keepalive rather than by traffic — the browser throttles a hidden tab and the
 		// client stops asking for slices, so silence on a socket is the ordinary case and never
 		// a reason to drop the subscriber.
-		if (poll(fds, (nfds_t)(nc + 1), -1) < 0) break;
+		// The transport's two descriptors go after the clients, so the `i + 1` the client loop
+		// below indexes by stays what it was.
+		const int wt_at = nc + 1;
+		if (wt) {
+			fds[wt_at].fd = wt_udp;
+			fds[wt_at].events = POLLIN;
+			fds[wt_at + 1].fd = wt_timer;
+			fds[wt_at + 1].events = POLLIN;
+		}
+		if (poll(fds, (nfds_t)(nc + 1 + (wt ? 2 : 0)), -1) < 0) break;
+
+		// Before the clients, because picoquic's timer is how a connection that has gone quiet
+		// is retransmitted to or timed out, and a ward with nobody typing is the ordinary case.
+		if (wt) {
+			if (fds[wt_at].revents & POLLIN) wt_readable(wt);
+			if (fds[wt_at + 1].revents & POLLIN) wt_tick(wt);
+		}
 
 		if (fds[0].revents & POLLIN) {
 			const int c = accept(lfd, NULL, NULL);
@@ -1484,6 +1560,7 @@ static int serve(int port, int nsparks, uint64_t seed) {
 	}
 
 	for (int i = 0; i < nc; i++) close(cl[i].fd);
+	wt_close(wt);
 	close(lfd);
 	rc = honest(&g, "the end");
 	close_ward(&g);
