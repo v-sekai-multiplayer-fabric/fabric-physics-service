@@ -48,6 +48,19 @@ target_link_libraries(queen PRIVATE weft_fdb_vfs picoquic_vendored weft::interac
 target_compile_options(queen PRIVATE -Wall -Wextra)
 set_target_properties(queen PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
 
+# MuJoCo, and the benchmark that asks how many players fit on one core.
+#
+# Off by default because MuJoCo's C++ core is a multi-minute build and `queen` does not link it.
+# CI turns it on. A developer changing the game should not pay for a physics engine they did not
+# touch, and a developer changing the benchmark knows to ask for it.
+option(PHYSICS_BENCH "Build MuJoCo and the one-core benchmark" OFF)
+if(PHYSICS_BENCH)
+  enable_testing()
+  set(PHYSICS_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
+  include(cmake/mujoco.cmake)
+  add_subdirectory(bench)
+endif()
+
 # Off by default, because it fetches. `test/` holds unit tests over the arithmetic in
 # `src/wire.h` and `src/rng.h` and nothing else — the game is tested by playing it, in
 # `ci/inside.sh`, against a real cluster. See `test/CMakeLists.txt`.
