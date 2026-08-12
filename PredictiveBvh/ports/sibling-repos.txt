@@ -1,0 +1,3 @@
+# PredictiveBvh/ports — sibling wiring declared per the hexagonal convention
+# wire: Shared — common primitive types
+# wire: Rebac — Formulas reference Relativistic; TODO invert via a port (known core->core leak)
