@@ -254,6 +254,209 @@ Not evidence of correctness. A render shows the shape of a scene and the shape o
 it says nothing about whether the state replayed bit for bit, which is `determinism_probe`'s job
 and is checked with `mj_getState` rather than with eyes.
 
+## 2026-08-12: a cube is ten players, and the wall is the island
+
+A reading taken from the entries above was wrong, and wrong in a way worth writing down because
+the arithmetic looked fine. The first entry says 166 players fit at 41% of the tick, and 41% was
+read as 59% of headroom to sell. It is not. The marginal cost of a player was taken from the
+`466 players, 0 cubes` row — a scene in which **the players have nothing to touch** — and then
+spent in a scene where they would be touching constantly. Pricing the free case and billing the
+expensive one.
+
+Repricing the same three rows against what each entity actually costs:
+
+| | marginal cost | entity budget charges it |
+| --- | ---: | ---: |
+| one cube | **21.4 µs** | 1 |
+| one player (3 mocap entities) | **2.2 µs** | 3 |
+
+**A cube costs ten times a player and is billed a third as much.** `WARD_AUTHORITY` is a uniform
+count over non-uniform costs, so every player admitted displaces budget it does not use and every
+cube consumes budget it is not charged for.
+
+### The variable is island size, not entity or contact count
+
+Reading the stacked-scene entry beside the flat-field one gives the real law. 900 cubes on a flat
+field are 900 independent islands of one body; a 204-cube pyramid is one island. Per body:
+
+| island size K | µs per body | source |
+| ---: | ---: | --- |
+| 1 | 21.4 | measured, flat field |
+| 100 | 543 | measured, 6-layer pyramid |
+| 204 | 6250 | measured, 10-layer pyramid |
+
+**100 coupled cubes cost more than 900 uncoupled ones.** Fitting the first two points gives
+`cost/body ≈ 21.4 · K^0.70 µs`, and at a 45 ms budget that is a design law:
+
+    bodies × K^0.70 ≤ 2103
+
+| island cap K | max simulated bodies |
+| ---: | ---: |
+| 1 | 2102 |
+| 3 | 972 |
+| 10 | 417 |
+| 20 | 256 |
+| 100 | 82 |
+
+The fit is three points and it **stops being a power law at the top**: K=204 measured 6250 µs
+against 896 predicted, seven times worse. Past about K=100 it is a cliff, not a curve, and should
+be treated as infeasible rather than extrapolated.
+
+### Which is why locked volumes are worth more than welding
+
+The stacked-scene entry proposed welding and a time-box, and said plainly that neither was
+measured. A third mechanism is better than both and needs no measurement to justify, because it
+is a rule rather than a behaviour: **if an entity can only be edited inside a volume its editor
+has locked, then bodies outside locked volumes are static** — infinite-mass anchors that
+terminate an island instead of propagating it. The lock volume *is* the island cap, `K ≤ E`, and
+it cannot be exceeded by any input. It also kills island merging, which welding does not: two
+disjoint volumes cannot couple.
+
+900 bodies at E=3 is 41.6 ms and fits; at E=5 it is 59.4 ms and does not. So the cost is legible
+and paid in gameplay — **stacks are three high** — rather than paid in dropped ticks by everyone
+in the zone. That is the same limit welding would impose, moved to where a player can see it.
+
+### What this does not say
+
+- The 21.4 / 2.2 µs split and the three island points are re-readings of runs already in the
+  table below. **No new run was taken for this entry.**
+- `K^0.70` is fitted from two points and contradicted by the third. It is a design aid, not a
+  model. The measurement that would settle it is island size against tick cost swept over
+  K = 1..30, which nothing has run.
+- Locked volumes are not implemented and not measured. The claim here is that the bound is
+  *enforceable*, which is an argument about the mechanism, not evidence about its cost.
+- Lock acquisition is a distributed mutex and has its own floor — see the entry below.
+
+## 2026-08-12: the second wall is the NIC, and it wants a different machine
+
+The first entry already said the fan-out overtakes the physics and that egress is the limit. What
+it did not say is that the two limits live on **different machines**, and that this is forced
+rather than chosen once network interfaces are per-VM.
+
+| tier | binds on | its other resource |
+| --- | --- | --- |
+| zone (MuJoCo) | core — largest island | egress 22.4 Mbps, never NIC-bound |
+| fan-out | NIC | no physics, never core-bound |
+
+A combined process wastes whichever resource it does not bind on. Split, each saturates the one
+it is actually limited by.
+
+The fan is worth stating as an asymmetry: a fan-out process pays **22.4 Mbps of ingress once** —
+one copy of zone state — however many subscribers it serves, and everything above that is egress.
+On a 1 Gbit interface at the measured 0.349 Mbps a subscriber that is 2797 subscribers, an
+amplification of 43.7×. **Interest management is what makes the fan possible**: 64 of 1398
+entities is 21.8×, and without it the same interface carries 130 subscribers rather than 2797.
+
+No cascade is needed at any scale being discussed. At 22.4 Mbps per downstream a 1 Gbit zone
+feeds 44 fan-out processes, about 123,000 subscribers, on a flat tier.
+
+### Which shape of machine
+
+Modelled, not measured — `N`-core machines at a flat $31/core/month, 1 Gbit per machine, egress
+at $0.02/GB, one million players:
+
+| | zone VMs | fan VMs | machines | cores | compute/mo |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| all-small | 1000 | 153 | 1153 | 1153 | $35,743 |
+| all-large | 63 | 233 | 296 | 4736 | $146,816 |
+| **large zone, small fan** | 63 | 153 | **216** | 1161 | **$35,991** |
+
+Neither extreme is right because the tiers want opposite shapes. Zones want **large**: islands are
+independent so cores fill exactly, and — the better reason — islands on one machine coordinate
+through memory rather than through the network, so a large zone machine makes many zones' worth of
+seams free. Fan-out wants **small**: the interface is per-machine, so a large fan-out machine pays
+for cores it cannot feed.
+
+**Egress is 96% of the bill at that scale and is identical in every row.** Machine shape is a
+3.6% cost decision and a 5× machine-count decision. At lower egress prices — committed transit,
+private links — the shape choice becomes most of the bill instead, so the ratio is worth
+re-deriving rather than inheriting.
+
+### What this does not say
+
+- Everything after the 22.4 Mbps and 0.349 Mbps figures is **arithmetic on a model**, not a
+  measurement. No fan-out tier has been deployed and no machine of any shape has been rented.
+- The flat-per-machine interface assumption is the whole fan-out argument. If bandwidth scales
+  with machine size instead, large fan-out machines tie rather than lose, and the mixed shape's
+  advantage collapses to the zone tier alone. **This is one number to check with a provider and
+  it has not been checked.**
+- $31/core and $0.02/GB are round numbers chosen for internal consistency, not quotes.
+
+## 2026-08-12: which tricks survive the worst case, and why the tree carries two curves
+
+### Yields and bounds
+
+Sorting the optimisations by what they do in the worst case — everything moving, everyone in one
+place — separates them cleanly, and the separation predicts which will disappoint:
+
+| | kind | in the churn case |
+| --- | --- | ---: |
+| send only what changed | yield | **2%** |
+| speculative branch-and-merge instead of locking | yield | **1.1×** |
+| locked volumes | bound | holds |
+| fixed-budget priority accumulator | bound | holds |
+| log-depth routing overlay | bound | holds |
+
+**Yields key off things not interacting, and the worst case is defined by interaction.** Avatars
+are the reason: they are mocap, driven from outside, and a tracked headset never rests, so the
+dormant set is close to empty exactly when it is most needed. A yield cannot be sized against
+because its value is whatever the players happen to leave alone.
+
+This is why the priority accumulator matters more than its compression ratio suggests. Interest
+management and a fixed 64-packet budget give the same reduction on a spread-out scene; only the
+second still gives it when everyone stands in one place.
+
+### The lockstep crossover moves once reliability is priced
+
+The second entry left lockstep open on the grounds that the simulation replays. Its bandwidth
+advantage is real and smaller than it looks: a lost input in lockstep is not a glitch but a
+permanent desync, so inputs need redundancy, and every peer needs every input — there is no
+interest management for intent. Crossover against a fixed 64-entity slice:
+
+| intent encoding | crossover |
+| --- | ---: |
+| 30 B, no redundancy | 74 players |
+| 3 poses quantised, no redundancy | 37 |
+| the same with 2× redundancy | **19** |
+
+Below that lockstep wins by a wide margin, which is why the article's four-player host chose it.
+A ward of 166 is not below it.
+
+### Two space-filling curves, and why neither can be dropped
+
+`lean-spatial-oracle`'s `PredictiveBvh.core.CurveDuality` proves this rather than asserting it,
+because it came up as "surely one of them is redundant" and the answer is no:
+
+| | Morton | Hilbert |
+| --- | ---: | ---: |
+| `f(a⊕b) = f(a)⊕f(b)` | **4096/4096** | 1600/4096 |
+| query ranges, 3×3 windows over 16×16 | 868 | **568** |
+| worst single window | 5 | **4** |
+
+Morton is a bit permutation and therefore GF(2)-linear. A butterfly overlay is the Cayley graph of
+(ℤ/2)ⁿ under XOR, so its stages are XOR by a basis vector — linearity is what makes a stage a
+spatial translation rather than an arbitrary jump. Hilbert is not linear, because each level's
+rotation is chosen by the prefix.
+
+What Hilbert buys is contiguity, and the cluster counts are the price of doing without it: a
+Hilbert code prefix stays a compact region, which is what zone spans, bucket ranges and geometric
+authority are all built on.
+
+Neither is the other's dual. (ℤ/2)ⁿ is Pontryagin self-dual, so Morton's structure is its own
+dual — which is why a butterfly can be transposed and run in reverse at all. Hilbert has no
+characters to dualise. **They are complements, not alternatives**, and carrying both is forced.
+
+### What this does not say
+
+- The curve figures are exact and proved by `native_decide` on 8×8 and 16×16 grids. Whether the
+  ratio holds at the 30-bit codes actually used is not proved, only expected.
+- The 1600/4096 is worth noticing: Hilbert satisfies the linearity identity for a large minority
+  of pairs, so **sampling a few pairs would make it look linear**. An earlier throwaway check with
+  a wrong reflection term reported 146/4000 and would have supported the same conclusion for the
+  wrong reason.
+- No routing overlay is built. The curve work says which code it would have to use, not that it
+  is worth building — at present scales the log-depth saving is a wash.
+
 ## Every run, as it was logged
 
 `bench_players --log docs/logbook/one_core.md` appends here. The rows below are the raw
