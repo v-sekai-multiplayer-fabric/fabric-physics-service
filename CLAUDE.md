@@ -139,15 +139,10 @@ byte-identical to its source. Send a fix upstream first. Then vendor the fix.
 
 ## Conventions
 
-- Commit style: sentence case. Do not use a `type(scope):` prefix.
-- Make each commit small and self-contained. Keep one concern in one commit.
 - Do not use the word "mint" in this project. Check branch names also. A rename of a head
   branch closes its PR.
 - Put a runbook in the unit file. Put a reason in a code comment. Put a decision in the
   manuals repository. `README.md` is not a manual.
-- Match the comment density of FoundationDB, which is 12 to 14 percent of non-blank lines in
-  `fdbserver`, `fdbclient` and `flow` at 7.3. Comment why the code does a thing, not what it
-  does. `src/` is above that today and comes down as files are touched, not in a sweep.
 - Print all of a list, or print a count and a note. Do not print part of a list.
 - Do not hardcode an absolute filesystem path. Use an environment variable.
 - Build out of the source tree. The host `build/` is not the container `build/`.
