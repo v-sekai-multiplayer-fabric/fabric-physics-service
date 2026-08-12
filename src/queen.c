@@ -48,6 +48,12 @@ int weft_txn_join(sqlite3 *db, unsigned long long txnid);
 int weft_txn_commit(unsigned long long txnid);
 int weft_txn_abort(unsigned long long txnid);
 
+// How many databases one group commit may hold. This mirrors `TXN_MAX_PARTS` in the store
+// plane's `fdb_vfs.c`, which enforces it: a `weft_txn_join` past the limit answers
+// SQLITE_FULL rather than overrunning.
+#define TXN_MAX_PARTS 16
+
+
 #define MAX_SPARKS 64
 #define BOARD_SIZE 6
 
@@ -555,67 +561,111 @@ static int choose(gyre_t *g, spark_t *s) {
 	return best;
 }
 
+// The group a cycle commits as. The ward is always a participant; a Spark joins the first
+// time the cycle writes to them, which is at most once per contract on the board.
+//
+// `TXN_MAX_PARTS` is 16, so this holds only because the board caps how many Sparks can act:
+// BOARD_SIZE is 6 and the Rails add 3, so at most 9 Sparks are written in a cycle, and with
+// the ward that is 10 of the 16. A board that grew past 15 would need the group flushed and
+// reopened mid-cycle, and `join` returning SQLITE_FULL is what would say so rather than a
+// silent overrun.
+typedef struct {
+	unsigned long long txn;
+	sqlite3 *dbs[TXN_MAX_PARTS]; // the participants that have an open SQLite transaction
+	int ndbs;
+} group_t;
+
+static int group_join(group_t *grp, sqlite3 *db) {
+	for (int i = 0; i < grp->ndbs; i++) {
+		if (grp->dbs[i] == db) return 0;
+	}
+	if (grp->ndbs >= TXN_MAX_PARTS) return 1;
+	// Join before the first write. From here this file's syncs stage instead of committing,
+	// so a caller cannot join after the fact.
+	if (weft_txn_join(db, grp->txn) != SQLITE_OK) return 1;
+	if (run(db, "BEGIN")) return 1;
+	grp->dbs[grp->ndbs++] = db;
+	return 0;
+}
+
+static int group_begin(group_t *grp, sqlite3 *ward) {
+	memset(grp, 0, sizeof *grp);
+	if (weft_txn_begin(&grp->txn) != SQLITE_OK) return 1;
+	return group_join(grp, ward);
+}
+
+static void group_abort(group_t *grp) {
+	for (int i = 0; i < grp->ndbs; i++) {
+		sqlite3_exec(grp->dbs[i], "ROLLBACK", NULL, NULL, NULL);
+	}
+	weft_txn_abort(grp->txn);
+}
+
+// Every participant commits its SQLite transaction, which stages its pages, and then the
+// group record is written. That order is the protocol: no head has moved until the record
+// says the group committed.
+static int group_commit(group_t *grp) {
+	for (int i = 0; i < grp->ndbs; i++) {
+		if (run(grp->dbs[i], "COMMIT")) {
+			group_abort(grp);
+			return 1;
+		}
+	}
+	return weft_txn_commit(grp->txn) != SQLITE_OK;
+}
+
 // ── Paying a Spark ────────────────────────────────────────────────────────────
 //
 // The ward's treasury and the Spark's purse are two databases, so this is one event that
 // has to land in both or in neither. That is the parallel commit protocol, and the game
 // reaches it by paying somebody rather than by a test reaching for it deliberately.
 //
-// Each participant is an explicit SQLite transaction. Autocommit would let the first write
-// commit on its own at xSync, and then the group would only contain whatever had not been
-// written yet.
-static int pay(gyre_t *g, spark_t *s, int amount, const char *item, const char *kind) {
-	unsigned long long txn = 0;
+// This used to open a group of its own, which made a payment its own round trip. It now
+// joins the cycle's group, because the payment and the cycle that caused it have no reason
+// to be separately durable: a cycle is one transaction, which is what the README always
+// claimed and the code did not do.
+static int pay(gyre_t *g, group_t *grp, spark_t *s, int amount, const char *item,
+               const char *kind) {
 	char sql[256];
 
-	if (weft_txn_begin(&txn) != SQLITE_OK) return 1;
-	if (weft_txn_join(g->ward, txn) != SQLITE_OK) goto give_up;
-	if (weft_txn_join(s->db, txn) != SQLITE_OK) goto give_up;
-
-	if (run(g->ward, "BEGIN")) goto give_up;
-	if (run(s->db, "BEGIN")) goto give_up;
+	if (group_join(grp, s->db)) return 1;
 
 	snprintf(sql, sizeof sql,
 	         "INSERT INTO ledger(cycle, what, amount, spark) VALUES (%d, 'wages', %d, %d)",
 	         g->cycle, -amount, s->id);
-	if (run(g->ward, sql)) goto give_up;
+	if (run(g->ward, sql)) return 1;
 
 	snprintf(sql, sizeof sql, "UPDATE spark SET purse = purse + %d WHERE id = %d", amount,
 	         s->id);
-	if (run(s->db, sql)) goto give_up;
+	if (run(s->db, sql)) return 1;
 
 	if (item) {
 		snprintf(sql, sizeof sql, "INSERT INTO held VALUES ('%s', '%s', %d)", item, kind,
 		         g->cycle);
-		if (run(s->db, sql)) goto give_up;
+		if (run(s->db, sql)) return 1;
 	}
-
-	if (run(g->ward, "COMMIT")) goto give_up;
-	if (run(s->db, "COMMIT")) goto give_up;
-
-	if (weft_txn_commit(txn) != SQLITE_OK) return 1;
 
 	g->treasury -= amount;
 	s->purse += amount;
 	return 0;
-
-give_up:
-	sqlite3_exec(g->ward, "ROLLBACK", NULL, NULL, NULL);
-	sqlite3_exec(s->db, "ROLLBACK", NULL, NULL, NULL);
-	weft_txn_abort(txn);
-	return 1;
 }
+
 
 // ── One cycle ─────────────────────────────────────────────────────────────────
 
 static int cycle(gyre_t *g) {
 	char sql[256];
+	group_t grp;
 	g->cycle++;
+
+	// A cycle is one transaction. Every write below lands in this group, and the round trip
+	// is paid once for the cycle rather than once for each statement.
+	if (group_begin(&grp, g->ward)) return 1;
 
 	// -1 is a Queen who held, which is most cycles. -2 is a Queen who could not plan, and that
 	// stops the ward rather than passing for the same thing.
-	if (commission(g) == -2) return 1;
-	if (post_board(g)) return 1;
+	if (commission(g) == -2) goto give_up;
+	if (post_board(g)) goto give_up;
 
 	for (int i = 0; i < g->nsparks; i++) {
 		spark_t *s = &g->sparks[i];
@@ -648,7 +698,7 @@ static int cycle(gyre_t *g) {
 			snprintf(sql, sizeof sql,
 			         "INSERT INTO ledger(cycle, what, amount, spark) VALUES (%d,'salvage',%d,%d)",
 			         g->cycle, earned, s->id);
-			if (run(g->ward, sql)) return 1;
+			if (run(g->ward, sql)) goto give_up;
 		}
 
 		// A Frame wears. A cycle's rest takes a little of it back, and the Den takes much
@@ -661,14 +711,14 @@ static int cycle(gyre_t *g) {
 
 		snprintf(sql, sizeof sql, "UPDATE board SET outcome = '%s' WHERE id = %d",
 		         won ? "kept" : "lost", id);
-		if (run(g->ward, sql)) return 1;
+		if (run(g->ward, sql)) goto give_up;
 
 		// A Spark is paid a share whether or not the contract kept, because a ward that only
 		// pays for success does not keep its Sparks for long. The share of nothing is
 		// nothing, so a failed cycle still costs them.
 		const int wage = won ? earned / 2 : 4;
 		if (wage > 0 && g->treasury >= wage) {
-			if (pay(g, s, wage, found_item, "salvage")) return 1;
+			if (pay(g, &grp, s, wage, found_item, "salvage")) goto give_up;
 		}
 
 		// The Spark went to the work. This is the move that reaches other players: the Frame
@@ -681,11 +731,12 @@ static int cycle(gyre_t *g) {
 		snprintf(sql, sizeof sql, "SELECT z FROM board WHERE id = %d", id);
 		s->at.z = scalar64(g->ward, sql);
 
+		if (group_join(&grp, s->db)) goto give_up;
 		snprintf(sql, sizeof sql,
 		         "UPDATE spark SET wear = %d, cycles = %d, x = %" PRId64 ", y = %" PRId64
 		         ", z = %" PRId64 " WHERE id = %d",
 		         s->wear, g->cycle, s->at.x, s->at.y, s->at.z, s->id);
-		if (run(s->db, sql)) return 1;
+		if (run(s->db, sql)) goto give_up;
 	}
 
 	// The Debt Clock. It compounds first and is paid second, which is the order that makes
@@ -705,7 +756,7 @@ static int cycle(gyre_t *g) {
 		snprintf(sql, sizeof sql,
 		         "INSERT INTO ledger(cycle, what, amount, spark) VALUES (%d,'debt',%d,-1)",
 		         g->cycle, -paid);
-		if (run(g->ward, sql)) return 1;
+		if (run(g->ward, sql)) goto give_up;
 	}
 
 	// Word gets out, and Sparks arrive. The Broadcast Row cost five hundred scrip and until now
@@ -719,16 +770,31 @@ static int cycle(gyre_t *g) {
 	//
 	// It stops at the slice. That ceiling was a constant nobody reached; now it is the thing
 	// that ends the ward's growth, and past it the answer is a second ward.
-	if (built(g, 5) && g->nsparks < SPARKS_PER_WARD && g->cycle % ARRIVAL_CYCLES == 0) {
-		const int id = g->ward_no * SPARKS_PER_WARD + g->nsparks;
-		if (join_ward(g, id)) return 1;
-		printf("  cycle %d: word got out, and Spark %d arrived\n", g->cycle, id);
-	}
+	// The arrival is deliberately outside the group. `join_ward` founds a database and
+	// creates its tables, and a brand new participant joining a group that is already open
+	// would stage DDL against a head that did not exist when the group began. It draws
+	// nothing from the RNG and touches no scrip, so running it after the commit leaves the
+	// replay and the conservation sum exactly where they were.
+	const int arriving =
+	    built(g, 5) && g->nsparks < SPARKS_PER_WARD && g->cycle % ARRIVAL_CYCLES == 0;
 
 	snprintf(sql, sizeof sql,
 	         "UPDATE ward SET cycle=%d, treasury=%d, debt=%d, issued=%d, retired=%d",
 	         g->cycle, g->treasury, g->debt, g->issued, g->retired);
-	return run(g->ward, sql);
+	if (run(g->ward, sql)) goto give_up;
+
+	if (group_commit(&grp)) return 1;
+
+	if (arriving) {
+		const int id = g->ward_no * SPARKS_PER_WARD + g->nsparks;
+		if (join_ward(g, id)) return 1;
+		printf("  cycle %d: word got out, and Spark %d arrived\n", g->cycle, id);
+	}
+	return 0;
+
+give_up:
+	group_abort(&grp);
+	return 1;
 }
 
 // ── What the ward must never do ───────────────────────────────────────────────
