@@ -121,9 +121,20 @@ Do not propose `webtransportd`. The Queen terminates QUIC in her own process.
 | `thirdparty/store-plane`   | `fabric-store-plane`                          |
 | `thirdparty/gateway-edge`  | `fabric-gateway-edge`                         |
 | `thirdparty/taskweft`      | `nif`, the `standalone/` headers              |
+| `thirdparty/mujoco-riscv64`| `mujoco-riscv64`, MuJoCo 3.11.0 and its wiring |
 
 Vendor only from a `v-sekai-multiplayer-fabric` repository. A vendored copy MUST be
 byte-identical to its source. Send a fix upstream first. Then vendor the fix.
+
+`thirdparty/mujoco-riscv64` is not an interactor and does not build here yet. It is
+`mj_physics_init`/`mj_physics_step`/`mj_physics_close` over MuJoCo's C API, which loads an
+in-memory MJCF scene and steps it, and nothing that reads ward state or writes it back. Making
+it an interactor is `ask` in and reply bytes out over `weft_interactor_t`, with the ward as the
+scene rather than the fixed test body. Read `thirdparty/mujoco-riscv64/README.md` for the scope
+it claims; it is honest about what it has not done, and none of that is done by vendoring it.
+
+The subtree carries all of MuJoCo, which is about 200 MB checked out. That is the cost of the
+byte-identical rule and it is paid on every clone.
 
 ## Key files
 
