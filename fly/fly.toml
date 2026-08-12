@@ -1,0 +1,43 @@
+# fly deploy . --config fly/fly.toml
+#
+# No [[services]]: `queen serve` is raw TCP and Fly's shared IPv4 fronts only HTTP and TLS.
+# Reach it over WireGuard — fly proxy 4400:4400 --app fabric-store-queen
+#
+# WebTransport is not published here yet, and these are the three things it needs. None is a
+# preference; each one is a way the transport fails silently if it is missed.
+#
+#   - A dedicated IPv4. QUIC is UDP, and Fly carries UDP on neither a shared IPv4 nor a public
+#     IPv6. `fly ips allocate-v4`, which is billed.
+#   - QUEEN_WT_BIND = "fly-global-services". A UDP socket bound to `::` or `0.0.0.0` answers
+#     from the wrong source address and the replies are dropped on the way out. The TCP side
+#     must NOT bind it, which is why the two sockets take separate addresses.
+#   - The external and internal UDP ports must match. Fly rewrites the address and not the port.
+#
+# The MTU is already handled in `src/wt.c`: Fly spends about 72 bytes on WireGuard and its own
+# forwarding metadata, so the usable payload is nearer 1300 than 1500.
+app            = "fabric-store-queen"
+primary_region = "sjc"
+
+[build]
+  # Relative to this file; the build context is the deploy path (the repository root).
+  dockerfile = "Containerfile"
+
+[env]
+  QUEEN_PORT   = "4400"
+  QUEEN_SEED   = "20260811"
+  QUEEN_SPARKS = "8"
+  QUEEN_DATA   = "/data"
+
+[[mounts]]
+  source      = "ward_pages"
+  destination = "/data"
+
+# One machine. `open_db` sets PRAGMA locking_mode=EXCLUSIVE and the Queen is the single
+# writer; a second is the failure check_fence refuses.
+[deploy]
+  strategy = "immediate"
+
+[[vm]]
+  memory   = "2gb"
+  cpu_kind = "shared"
+  cpus     = 1

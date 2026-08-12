@@ -1,0 +1,5 @@
+.git
+build/
+client/node_modules/
+client/public/bundle.js
+client/test-results/

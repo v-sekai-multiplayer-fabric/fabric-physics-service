@@ -1,0 +1,39 @@
+ARG FDB_VERSION=7.3.76
+
+FROM ubuntu:24.04 AS build
+ARG FDB_VERSION
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+      adduser ca-certificates curl cmake g++ make libsqlite3-dev libssl-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL -o /tmp/clients.deb \
+      "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb" && \
+    dpkg -i /tmp/clients.deb && rm /tmp/clients.deb
+
+COPY . /repo
+RUN cmake -S /repo -B /build -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build /build -j"$(nproc)"
+
+FROM ubuntu:24.04
+ARG FDB_VERSION
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
+      adduser ca-certificates curl libsqlite3-0 libssl3t64 && \
+    rm -rf /var/lib/apt/lists/*
+
+# The server postinst hands the process to systemd, which a container has not got. Failing
+# there is expected; the files unpack either way and the entrypoint starts fdbserver itself.
+RUN curl -fsSL -o /tmp/clients.deb \
+      "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb" && \
+    curl -fsSL -o /tmp/server.deb \
+      "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-server_${FDB_VERSION}-1_amd64.deb" && \
+    (dpkg -i /tmp/clients.deb || true) && \
+    (dpkg -i /tmp/server.deb || true) && \
+    rm -f /tmp/clients.deb /tmp/server.deb
+
+COPY --from=build /build/queen /usr/local/bin/queen
+COPY fly/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
