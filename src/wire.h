@@ -142,10 +142,15 @@ static inline place_t contract_place(int id) {
 // position is an entity it cannot hold — so the non-physical ones take a place here instead of
 // taking none.
 //
-// The band is a plane below the Under-Market rather than a distant one. `hilbert_cell_of`
-// normalizes each axis against the scene extent, so a marker parked a kilometre up would spend
-// ten bits of Y resolution on empty air; thirty metres down costs one bit and no player's ghost
-// AABB reaches it.
+// The band is a plane below the Under-Market rather than a distant one, and where it goes is
+// `NonPhysical.lean` in `lean-spatial-oracle` rather than this file's taste. Two bounds:
+// `segment_beyond_ghost_reach` says the gap must clear the 20 m a body can throw a ghost in one
+// window, and `far_band_costs_four_bits` says a kilometre down leaves the deck 30 of
+// `hilbert_cell_of`'s 1024 steps where a plane one deck down leaves it 512. Both placements are
+// correct. One of them costs four bits of Y for it.
+//
+// The two moduli are the lattice: `place_injective_below_period` proves distinct ids get
+// distinct places up to 103 * 109, which covers `MAX_WARDS` wards of `SPARKS_PER_WARD`.
 #define NONPHYSICAL_UM UM(-60)
 
 static inline place_t nonphysical_place(uint32_t local) {
