@@ -1,17 +1,23 @@
 # fly deploy . --config fly/fly.toml
 #
-# No [[services]]: `queen serve` is raw TCP and Fly's shared IPv4 fronts only HTTP and TLS.
-# Reach it over WireGuard — fly proxy 4400:4400 --app fabric-store-queen
+# No [[services]]: Fly's shared IPv4 fronts only HTTP and TLS, and `queen serve` is QUIC.
 #
-# WebTransport is not published here yet, and these are the three things it needs. None is a
-# preference; each one is a way the transport fails silently if it is missed.
+# WebTransport is the only transport now — the raw TCP server that used to sit beside it, and
+# that this comment used to describe as the way in, is gone. So the three things below stopped
+# being what WebTransport *would* need and became what this app needs to answer at all. None is
+# a preference; each is a way the transport fails silently if it is missed.
 #
 #   - A dedicated IPv4. QUIC is UDP, and Fly carries UDP on neither a shared IPv4 nor a public
-#     IPv6. `fly ips allocate-v4`, which is billed.
+#     IPv6. `fly ips allocate-v4`, which is billed. Until it is allocated, reach the app over
+#     WireGuard — fly proxy 4400:4400/udp --app fabric-store-queen
 #   - QUEEN_WT_BIND = "fly-global-services". A UDP socket bound to `::` or `0.0.0.0` answers
-#     from the wrong source address and the replies are dropped on the way out. The TCP side
-#     must NOT bind it, which is why the two sockets take separate addresses.
+#     from the wrong source address and the replies are dropped on the way out. There is no
+#     second socket to keep off it any more; there is one, and it must bind this.
 #   - The external and internal UDP ports must match. Fly rewrites the address and not the port.
+#
+# QUEEN_TLS_CERT and QUEEN_TLS_KEY are no longer optional. `queen serve` refuses to start
+# without them rather than falling back to plaintext, which is the whole point of there being
+# one transport: a secret that fails to mount now stops the machine instead of quietly serving.
 #
 # The MTU is already handled in `src/wt.c`: Fly spends about 72 bytes on WireGuard and its own
 # forwarding metadata, so the usable payload is nearer 1300 than 1500.
