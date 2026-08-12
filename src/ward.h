@@ -51,7 +51,9 @@ typedef struct {
 int scalar(sqlite3 *db, const char *sql);
 int found_ward(gyre_t *g, const char *prefix, int nsparks, uint64_t seed, int base);
 int build_venue(gyre_t *g, int i);
-int pay(gyre_t *g, spark_t *s, int amount, const char *item, const char *kind);
+// A payment outside a cycle, in a group of its own. A payment inside a cycle joins that
+// cycle's group instead, and that one stays in `queen.c` because the group is the cycle's.
+int pay_alone(gyre_t *g, spark_t *s, int amount, const char *item, const char *kind);
 int cycle(gyre_t *g);
 int honest(gyre_t *g, const char *when);
 void close_ward(gyre_t *g);

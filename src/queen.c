@@ -58,6 +58,11 @@ int weft_txn_join(sqlite3 *db, unsigned long long txnid);
 int weft_txn_commit(unsigned long long txnid);
 int weft_txn_abort(unsigned long long txnid);
 
+// How many databases one group commit may hold. This mirrors `TXN_MAX_PARTS` in the store
+// plane's `fdb_vfs.c`, which enforces it: a `weft_txn_join` past the limit answers
+// SQLITE_FULL rather than overrunning.
+#define TXN_MAX_PARTS 16
+
 #define BOARD_SIZE 6
 
 // ── Where things are ──────────────────────────────────────────────────────────
@@ -413,6 +418,14 @@ int found_ward(gyre_t *g, const char *prefix, int nsparks, uint64_t seed, int ba
 	return 0;
 }
 
+// `SPARKS_PER_WARD` is derived from the venue table, which is this file's, so a caller outside
+// it asks rather than carries a copy of the number. `MAX_SPARKS` bounds the array and this
+// bounds the slice; whichever is nearer is the answer, because `join_ward` refuses at both.
+int ward_room(const gyre_t *g) {
+	const int room = (MAX_SPARKS < SPARKS_PER_WARD ? MAX_SPARKS : SPARKS_PER_WARD) - g->nsparks;
+	return room > 0 ? room : 0;
+}
+
 static int built(gyre_t *g, int venue) {
 	char sql[128];
 	snprintf(sql, sizeof sql, "SELECT built FROM venue WHERE id = %d", venue);
@@ -470,7 +483,7 @@ static int commission(gyre_t *g) {
 	// precondition of commissioning now rather than a `continue` in a loop, which is something
 	// a planner can reason around instead of something that silently skips.
 	view.reserve = 25 * g->nsparks;
-	view.room_to_grow = SPARKS_PER_WARD - g->nsparks;
+	view.room_to_grow = ward_room(g);
 	for (int i = 0; i < NVENUES; i++) {
 		snprintf(sql, sizeof sql, "SELECT built FROM venue WHERE id = %d", i);
 		view.built[i] = scalar(g->ward, sql);
@@ -567,67 +580,132 @@ static int choose(gyre_t *g, spark_t *s) {
 	return best;
 }
 
+// The group a cycle commits as. The ward is always a participant; a Spark joins the first
+// time the cycle writes to them, which is at most once per contract on the board.
+//
+// `TXN_MAX_PARTS` is 16, so this holds only because the board caps how many Sparks can act:
+// BOARD_SIZE is 6 and the Rails add 3, so at most 9 Sparks are written in a cycle, and with
+// the ward that is 10 of the 16. A board that grew past 15 would need the group flushed and
+// reopened mid-cycle, and `join` returning SQLITE_FULL is what would say so rather than a
+// silent overrun.
+typedef struct {
+	unsigned long long txn;
+	sqlite3 *dbs[TXN_MAX_PARTS]; // the participants that have an open SQLite transaction
+	int ndbs;
+} group_t;
+
+static int group_join(group_t *grp, sqlite3 *db) {
+	for (int i = 0; i < grp->ndbs; i++) {
+		if (grp->dbs[i] == db) return 0;
+	}
+	if (grp->ndbs >= TXN_MAX_PARTS) return 1;
+	// Join before the first write. From here this file's syncs stage instead of committing,
+	// so a caller cannot join after the fact.
+	if (weft_txn_join(db, grp->txn) != SQLITE_OK) return 1;
+	if (run(db, "BEGIN")) return 1;
+	grp->dbs[grp->ndbs++] = db;
+	return 0;
+}
+
+static int group_begin(group_t *grp, sqlite3 *ward) {
+	memset(grp, 0, sizeof *grp);
+	if (weft_txn_begin(&grp->txn) != SQLITE_OK) return 1;
+	return group_join(grp, ward);
+}
+
+static void group_abort(group_t *grp) {
+	for (int i = 0; i < grp->ndbs; i++) {
+		sqlite3_exec(grp->dbs[i], "ROLLBACK", NULL, NULL, NULL);
+	}
+	weft_txn_abort(grp->txn);
+}
+
+// Every participant commits its SQLite transaction, which stages its pages, and then the
+// group record is written. That order is the protocol: no head has moved until the record
+// says the group committed.
+static int group_commit(group_t *grp) {
+	for (int i = 0; i < grp->ndbs; i++) {
+		if (run(grp->dbs[i], "COMMIT")) {
+			group_abort(grp);
+			return 1;
+		}
+	}
+	return weft_txn_commit(grp->txn) != SQLITE_OK;
+}
+
 // ── Paying a Spark ────────────────────────────────────────────────────────────
 //
 // The ward's treasury and the Spark's purse are two databases, so this is one event that
 // has to land in both or in neither. That is the parallel commit protocol, and the game
 // reaches it by paying somebody rather than by a test reaching for it deliberately.
 //
-// Each participant is an explicit SQLite transaction. Autocommit would let the first write
-// commit on its own at xSync, and then the group would only contain whatever had not been
-// written yet.
-int pay(gyre_t *g, spark_t *s, int amount, const char *item, const char *kind) {
-	unsigned long long txn = 0;
+// This used to open a group of its own, which made a payment its own round trip. It now
+// joins the cycle's group, because the payment and the cycle that caused it have no reason
+// to be separately durable: a cycle is one transaction, which is what the README always
+// claimed and the code did not do.
+static int pay(gyre_t *g, group_t *grp, spark_t *s, int amount, const char *item,
+               const char *kind) {
 	char sql[256];
 
-	if (weft_txn_begin(&txn) != SQLITE_OK) return 1;
-	if (weft_txn_join(g->ward, txn) != SQLITE_OK) goto give_up;
-	if (weft_txn_join(s->db, txn) != SQLITE_OK) goto give_up;
-
-	if (run(g->ward, "BEGIN")) goto give_up;
-	if (run(s->db, "BEGIN")) goto give_up;
+	if (group_join(grp, s->db)) return 1;
 
 	snprintf(sql, sizeof sql,
 	         "INSERT INTO ledger(cycle, what, amount, spark) VALUES (%d, 'wages', %d, %d)",
 	         g->cycle, -amount, s->id);
-	if (run(g->ward, sql)) goto give_up;
+	if (run(g->ward, sql)) return 1;
 
 	snprintf(sql, sizeof sql, "UPDATE spark SET purse = purse + %d WHERE id = %d", amount,
 	         s->id);
-	if (run(s->db, sql)) goto give_up;
+	if (run(s->db, sql)) return 1;
 
 	if (item) {
 		snprintf(sql, sizeof sql, "INSERT INTO held VALUES ('%s', '%s', %d)", item, kind,
 		         g->cycle);
-		if (run(s->db, sql)) goto give_up;
+		if (run(s->db, sql)) return 1;
 	}
-
-	if (run(g->ward, "COMMIT")) goto give_up;
-	if (run(s->db, "COMMIT")) goto give_up;
-
-	if (weft_txn_commit(txn) != SQLITE_OK) return 1;
 
 	g->treasury -= amount;
 	s->purse += amount;
 	return 0;
+}
 
-give_up:
-	sqlite3_exec(g->ward, "ROLLBACK", NULL, NULL, NULL);
-	sqlite3_exec(s->db, "ROLLBACK", NULL, NULL, NULL);
-	weft_txn_abort(txn);
-	return 1;
+// A payment nobody's cycle asked for. A player who types `/pay` is outside the cycle group,
+// so this opens one for the payment alone and pays the round trip that a payment inside a
+// cycle no longer does. The two sides still land together or not at all, which is the part
+// that matters: `group_t` is how a cycle saves round trips, not how a transfer stays whole.
+int pay_alone(gyre_t *g, spark_t *s, int amount, const char *item, const char *kind) {
+	group_t grp;
+	if (group_begin(&grp, g->ward)) return 1;
+	if (pay(g, &grp, s, amount, item, kind)) {
+		group_abort(&grp);
+		return 1;
+	}
+	if (group_commit(&grp)) {
+		// `pay` moved the scrip in memory before the group landed, and the ward outlives a
+		// refused command. Put it back, or the next `honest` would report a hole that the
+		// databases do not have.
+		g->treasury += amount;
+		s->purse -= amount;
+		return 1;
+	}
+	return 0;
 }
 
 // ── One cycle ─────────────────────────────────────────────────────────────────
 
 int cycle(gyre_t *g) {
 	char sql[256];
+	group_t grp;
 	g->cycle++;
+
+	// A cycle is one transaction. Every write below lands in this group, and the round trip
+	// is paid once for the cycle rather than once for each statement.
+	if (group_begin(&grp, g->ward)) return 1;
 
 	// -1 is a Queen who held, which is most cycles. -2 is a Queen who could not plan, and that
 	// stops the ward rather than passing for the same thing.
-	if (commission(g) == -2) return 1;
-	if (post_board(g)) return 1;
+	if (commission(g) == -2) goto give_up;
+	if (post_board(g)) goto give_up;
 
 	for (int i = 0; i < g->nsparks; i++) {
 		spark_t *s = &g->sparks[i];
@@ -660,7 +738,7 @@ int cycle(gyre_t *g) {
 			snprintf(sql, sizeof sql,
 			         "INSERT INTO ledger(cycle, what, amount, spark) VALUES (%d,'salvage',%d,%d)",
 			         g->cycle, earned, s->id);
-			if (run(g->ward, sql)) return 1;
+			if (run(g->ward, sql)) goto give_up;
 		}
 
 		// A Frame wears. A cycle's rest takes a little of it back, and the Den takes much
@@ -673,14 +751,14 @@ int cycle(gyre_t *g) {
 
 		snprintf(sql, sizeof sql, "UPDATE board SET outcome = '%s' WHERE id = %d",
 		         won ? "kept" : "lost", id);
-		if (run(g->ward, sql)) return 1;
+		if (run(g->ward, sql)) goto give_up;
 
 		// A Spark is paid a share whether or not the contract kept, because a ward that only
 		// pays for success does not keep its Sparks for long. The share of nothing is
 		// nothing, so a failed cycle still costs them.
 		const int wage = won ? earned / 2 : 4;
 		if (wage > 0 && g->treasury >= wage) {
-			if (pay(g, s, wage, found_item, "salvage")) return 1;
+			if (pay(g, &grp, s, wage, found_item, "salvage")) goto give_up;
 		}
 
 		// The Spark went to the work. This is the move that reaches other players: the Frame
@@ -693,11 +771,12 @@ int cycle(gyre_t *g) {
 		snprintf(sql, sizeof sql, "SELECT z FROM board WHERE id = %d", id);
 		s->at.z = scalar64(g->ward, sql);
 
+		if (group_join(&grp, s->db)) goto give_up;
 		snprintf(sql, sizeof sql,
 		         "UPDATE spark SET wear = %d, cycles = %d, x = %" PRId64 ", y = %" PRId64
 		         ", z = %" PRId64 " WHERE id = %d",
 		         s->wear, g->cycle, s->at.x, s->at.y, s->at.z, s->id);
-		if (run(s->db, sql)) return 1;
+		if (run(s->db, sql)) goto give_up;
 	}
 
 	// The Debt Clock. It compounds first and is paid second, which is the order that makes
@@ -717,7 +796,7 @@ int cycle(gyre_t *g) {
 		snprintf(sql, sizeof sql,
 		         "INSERT INTO ledger(cycle, what, amount, spark) VALUES (%d,'debt',%d,-1)",
 		         g->cycle, -paid);
-		if (run(g->ward, sql)) return 1;
+		if (run(g->ward, sql)) goto give_up;
 	}
 
 	// Word gets out, and Sparks arrive. The Broadcast Row cost five hundred scrip and until now
@@ -731,16 +810,31 @@ int cycle(gyre_t *g) {
 	//
 	// It stops at the slice. That ceiling was a constant nobody reached; now it is the thing
 	// that ends the ward's growth, and past it the answer is a second ward.
-	if (built(g, 5) && g->nsparks < SPARKS_PER_WARD && g->cycle % ARRIVAL_CYCLES == 0) {
-		const int id = g->ward_no * SPARKS_PER_WARD + g->nsparks;
-		if (join_ward(g, id)) return 1;
-		printf("  cycle %d: word got out, and Spark %d arrived\n", g->cycle, id);
-	}
+	// The arrival is deliberately outside the group. `join_ward` founds a database and
+	// creates its tables, and a brand new participant joining a group that is already open
+	// would stage DDL against a head that did not exist when the group began. It draws
+	// nothing from the RNG and touches no scrip, so running it after the commit leaves the
+	// replay and the conservation sum exactly where they were.
+	const int arriving =
+	    built(g, 5) && g->nsparks < SPARKS_PER_WARD && g->cycle % ARRIVAL_CYCLES == 0;
 
 	snprintf(sql, sizeof sql,
 	         "UPDATE ward SET cycle=%d, treasury=%d, debt=%d, issued=%d, retired=%d",
 	         g->cycle, g->treasury, g->debt, g->issued, g->retired);
-	return run(g->ward, sql);
+	if (run(g->ward, sql)) goto give_up;
+
+	if (group_commit(&grp)) return 1;
+
+	if (arriving) {
+		const int id = g->ward_no * SPARKS_PER_WARD + g->nsparks;
+		if (join_ward(g, id)) return 1;
+		printf("  cycle %d: word got out, and Spark %d arrived\n", g->cycle, id);
+	}
+	return 0;
+
+give_up:
+	group_abort(&grp);
+	return 1;
 }
 
 // ── What the ward must never do ───────────────────────────────────────────────
@@ -1064,105 +1158,25 @@ done:
 // over days with nothing in the critical path to draw. A thread per client would buy nothing
 // and would put two writers where the VFS permits one.
 
-#define MAX_CLIENTS 64
-#define LINE_MAX_BYTES 512
-#define REPLY_MAX_BYTES 262144
-
-// ── The listening socket ──────────────────────────────────────────────────────
-
-typedef struct {
-	int fd;
-	size_t n;
-	char line[LINE_MAX_BYTES];
-} client_t;
-
-static int listen_on(int port) {
-	struct sockaddr_in6 a;
-	int fd = socket(AF_INET6, SOCK_STREAM, 0), on = 1, off = 0;
-	if (fd < 0) return -1;
-	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
-	// One socket for both families. Fly gives an app an IPv6 address and may give it no IPv4 at
-	// all, and a v6-only listener that a v4 client cannot reach is the failure that looks like a
-	// firewall. RFD 0112 records the other half of this: Chromium's resolver can fail where curl
-	// succeeds on a v6-only app, so a test navigates to the bracketed literal.
-	setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof off);
-
-	memset(&a, 0, sizeof a);
-	a.sin6_family = AF_INET6;
-	a.sin6_addr = in6addr_any;
-	a.sin6_port = htons((uint16_t)port);
-	if (bind(fd, (struct sockaddr *)&a, sizeof a) || listen(fd, 16)) {
-		close(fd);
-		return -1;
-	}
-	return fd;
-}
-
-// A reply, framed. Four bytes of length and then the CBOR, so a reader knows how much to wait
-// for without scanning for a delimiter that a venue's name could contain.
-static int send_reply(int fd, const unsigned char *body, size_t n) {
-	unsigned char head[4] = {(unsigned char)(n >> 24), (unsigned char)(n >> 16),
-	                         (unsigned char)(n >> 8), (unsigned char)n};
-	size_t sent = 0;
-	if (send(fd, head, 4, MSG_NOSIGNAL) != 4) return 1;
-	while (sent < n) {
-		const ssize_t w = send(fd, body + sent, n - sent, MSG_NOSIGNAL);
-		if (w <= 0) return 1;
-		sent += (size_t)w;
-	}
-	return 0;
-}
-
-// ── The same ward, over WebTransport ──────────────────────────────────────────
-//
-// `wt.c` terminates the transport and hands a whole command here. It is the same
-// `serve_command` the TCP line server calls, against the same ward: two ways in, one writer,
-// and no second copy of the rules. What differs is only the framing, and on WebTransport
-// there is none — the client's FIN ended the command and this reply's FIN ends the answer.
-typedef struct {
-	gyre_t *g;
-} wt_app_t;
-
-static size_t on_wt_command(void *app, const char *line, unsigned char *reply, size_t cap,
-                            int *stop) {
-	wt_app_t *a = (wt_app_t *)app;
-	char buf[LINE_MAX_BYTES];
-
-	// `serve_command` writes NULs into the line to split it, so it gets a copy it may own.
-	snprintf(buf, sizeof buf, "%s", line);
-
-	cbor_t c = {reply, 0, cap, 0};
-	(void)serve_command(a->g, buf, &c, stop);
-	if (c.over) {
-		fprintf(stderr, "the ward does not fit in %zu bytes\n", cap);
-		return 0;
-	}
-	return c.n;
-}
+// A service is a poll loop over transports, and nothing more. It does not know what a
+// command means — that is `interactor.c` — and it does not know what a descriptor is for —
+// that is the transport's. What it owns is the ward, which is why it lives here.
+#define MAX_FDS (WEFT_TRANSPORT_MAX_FDS + 128)
 
 static int serve(int port, int nsparks, uint64_t seed) {
-	// Two more than the clients and the listener: the UDP socket and picoquic's own timer.
-	struct pollfd fds[MAX_CLIENTS + 3];
-	client_t cl[MAX_CLIENTS];
-	unsigned char *reply = malloc(REPLY_MAX_BYTES);
+	struct pollfd fds[MAX_FDS];
+	weft_transport_t tr[2];
+	int ntr = 0, rc;
 	gyre_t g;
-	int lfd, nc = 0, rc = 1, stop = 0;
+	tcp_t *tcp;
 	wt_t *wt = NULL;
-	wt_app_t wt_app;
-	int wt_udp = -1, wt_timer = -1;
 
-	if (!reply) return 1;
 	memset(&g, 0, sizeof g);
-	memset(cl, 0, sizeof cl);
+	if (found_ward(&g, "gyre-live", nsparks, seed, 0)) return 1;
 
-	if (found_ward(&g, "gyre-live", nsparks, seed, 0)) {
-		free(reply);
-		return 1;
-	}
-	if ((lfd = listen_on(port)) < 0) {
-		fprintf(stderr, "the ward has nowhere to listen on port %d\n", port);
+	const weft_interactor_t in = ward_interactor(&g);
+	if (!(tcp = tcp_open(port, in))) {
 		close_ward(&g);
-		free(reply);
 		return 1;
 	}
 	printf("the ward is open on port %d, with %d Sparks and seed %llu\n", port, nsparks,
@@ -1174,124 +1188,67 @@ static int serve(int port, int nsparks, uint64_t seed) {
 	// to disk first — `gateway-edge/TRANSPORT.md` records that, and so does `fly/entrypoint.sh`.
 	//
 	// Absent a cert this is the TCP line server alone, and it says so rather than pretending.
-	// That is a missing credential and not a door: the same code path runs either way.
+	// That is a missing credential and not a door: the same code path runs either way, and the
+	// interactor the two are handed is the same one.
 	{
 		const char *cert = getenv("QUEEN_TLS_CERT"), *key = getenv("QUEEN_TLS_KEY");
 		const char *bind_addr = getenv("QUEEN_WT_BIND");
 		const char *wt_port = getenv("QUEEN_WT_PORT");
 		if (cert && key) {
-			wt_app.g = &g;
-			wt = wt_open(wt_port ? atoi(wt_port) : port + 1, bind_addr, cert, key,
-			             on_wt_command, &wt_app);
+			wt = wt_open(wt_port ? atoi(wt_port) : port + 1, bind_addr, cert, key, in);
 			if (!wt) {
 				fprintf(stderr, "the ward has no WebTransport, and a cert was given\n");
-				close(lfd);
+				tcp_close(tcp);
 				close_ward(&g);
-				free(reply);
 				return 1;
 			}
-			wt_fds(wt, &wt_udp, &wt_timer);
 		} else {
 			printf("no QUEEN_TLS_CERT and QUEEN_TLS_KEY, so no WebTransport: TCP only\n");
 			fflush(stdout);
 		}
 	}
 
-	while (!stop) {
-		fds[0].fd = lfd;
-		fds[0].events = POLLIN;
-		for (int i = 0; i < nc; i++) {
-			fds[i + 1].fd = cl[i].fd;
-			fds[i + 1].events = POLLIN;
+	// WebTransport goes first, because picoquic's timer is how a connection that has gone quiet
+	// is retransmitted to or timed out, and a ward with nobody typing is the ordinary case.
+	if (wt) tr[ntr++] = wt_transport(wt);
+	tr[ntr++] = tcp_transport(tcp);
+
+	while (!tcp_stopped(tcp) && !(wt && wt_stopped(wt))) {
+		int owner[MAX_FDS], n = 0;
+
+		// Asked afresh every time round, because a listener's set changes as clients arrive and
+		// a loop that cached the answer would poll a socket that had been closed.
+		for (int t = 0; t < ntr; t++) {
+			int mine[MAX_FDS];
+			const int m = tr[t].fds(tr[t].ctx, mine, MAX_FDS - n);
+			for (int i = 0; i < m; i++) {
+				fds[n].fd = mine[i];
+				fds[n].events = POLLIN;
+				owner[n] = t;
+				n++;
+			}
 		}
+
 		// No timeout. A ward with nobody typing burns nothing, and a background tab holds its
 		// seat by keepalive rather than by traffic — the browser throttles a hidden tab and the
 		// client stops asking for slices, so silence on a socket is the ordinary case and never
 		// a reason to drop the subscriber.
-		// The transport's two descriptors go after the clients, so the `i + 1` the client loop
-		// below indexes by stays what it was.
-		const int wt_at = nc + 1;
-		if (wt) {
-			fds[wt_at].fd = wt_udp;
-			fds[wt_at].events = POLLIN;
-			fds[wt_at + 1].fd = wt_timer;
-			fds[wt_at + 1].events = POLLIN;
-		}
-		if (poll(fds, (nfds_t)(nc + 1 + (wt ? 2 : 0)), -1) < 0) break;
+		if (poll(fds, (nfds_t)n, -1) < 0) break;
 
-		// Before the clients, because picoquic's timer is how a connection that has gone quiet
-		// is retransmitted to or timed out, and a ward with nobody typing is the ordinary case.
-		if (wt) {
-			if (fds[wt_at].revents & POLLIN) wt_readable(wt);
-			if (fds[wt_at + 1].revents & POLLIN) wt_tick(wt);
-		}
-
-		if (fds[0].revents & POLLIN) {
-			const int c = accept(lfd, NULL, NULL);
-			if (c >= 0) {
-				if (nc < MAX_CLIENTS) {
-					cl[nc].fd = c;
-					cl[nc].n = 0;
-					nc++;
-				} else {
-					close(c); // the seats are full, and a silent queue would be worse
-				}
-			}
-		}
-
-		for (int i = 0; i < nc;) {
-			int gone = 0;
-			if (!(fds[i + 1].revents & (POLLIN | POLLHUP | POLLERR))) {
-				i++;
-				continue;
-			}
-			char buf[256];
-			const ssize_t r = recv(cl[i].fd, buf, sizeof buf, 0);
-			if (r <= 0) {
-				gone = 1;
-			} else {
-				for (ssize_t k = 0; k < r && !gone; k++) {
-					if (buf[k] == '\r') continue;
-					if (buf[k] != '\n') {
-						// A line longer than the buffer is dropped rather than truncated. A
-						// truncated command is a different command, and running one nobody typed
-						// is worse than answering none.
-						if (cl[i].n + 1 < sizeof cl[i].line) cl[i].line[cl[i].n++] = buf[k];
-						continue;
-					}
-					cl[i].line[cl[i].n] = '\0';
-					cl[i].n = 0;
-
-					cbor_t c = {reply, 0, REPLY_MAX_BYTES, 0};
-					const int bye = serve_command(&g, cl[i].line, &c, &stop);
-					if (c.over) {
-						// A ward too big to describe in one reply is a real limit and it is
-						// reported, not silently cut: a truncated batch decodes as a short one
-						// and the client cannot tell the difference.
-						fprintf(stderr, "the ward does not fit in %d bytes\n", REPLY_MAX_BYTES);
-						gone = 1;
-					} else if (send_reply(cl[i].fd, reply, c.n) || bye) {
-						gone = 1;
-					}
-				}
-			}
-			if (gone) {
-				close(cl[i].fd);
-				cl[i] = cl[nc - 1];
-				fds[i + 1].revents = 0;
-				nc--;
-			} else {
-				i++;
+		// A transport that drops a client changes its own set, so the descriptors are read from
+		// the array this loop already polled and handed back one at a time. Which one it is is
+		// the transport's business: a service that knew a UDP socket from a timer would be a
+		// service that knew what QUIC is.
+		for (int i = 0; i < n; i++) {
+			if (fds[i].revents & (POLLIN | POLLHUP | POLLERR)) {
+				tr[owner[i]].ready(tr[owner[i]].ctx, fds[i].fd);
 			}
 		}
 	}
 
-	for (int i = 0; i < nc; i++) close(cl[i].fd);
-	wt_close(wt);
-	close(lfd);
+	for (int t = 0; t < ntr; t++) tr[t].close(tr[t].ctx);
 	rc = honest(&g, "the end");
 	close_ward(&g);
-	free(reply);
 	return rc;
 }
 

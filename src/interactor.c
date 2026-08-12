@@ -14,6 +14,7 @@
 #include "ward.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 // ── The ward, as a subscriber sees it ─────────────────────────────────────────
@@ -154,7 +155,7 @@ static int ward_command(gyre_t *g, char *line, weft_cbor_t *c, int *stop) {
 		if (!s || amount <= 0 || g->treasury < amount) {
 			ok = 0;
 			say = "no such Spark here, or an amount the treasury will not reach";
-		} else if (pay(g, s, amount, NULL, NULL)) {
+		} else if (pay_alone(g, s, amount, NULL, NULL)) {
 			ok = 0;
 			say = "the payment landed on neither side";
 		} else {

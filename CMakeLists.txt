@@ -36,8 +36,14 @@ target_link_libraries(weft_fdb_vfs PUBLIC ${FDB_LIBRARY} ${SQLITE_LIBRARY} Threa
 # headers, which are the HTN planner with no Elixir and no NIF in it. Header-only C++20, so
 # `queen` links headers rather than a runtime, and `src/planner.cpp` is the only translation
 # unit that sees them.
-add_executable(queen src/queen.c src/planner.cpp src/wt.c)
+
+# The contract a command arrives under, vendored as a subtree. It links nothing, which is the
+# boundary: `src/interactor.c` says what the Queen's commands mean, and the two transports
+# below say how the bytes got here.
+add_subdirectory(thirdparty/interactor)
+
+add_executable(queen src/queen.c src/planner.cpp src/interactor.c src/transport_tcp.c src/wt.c)
 target_include_directories(queen PRIVATE src thirdparty/taskweft)
-target_link_libraries(queen PRIVATE weft_fdb_vfs picoquic_vendored)
+target_link_libraries(queen PRIVATE weft_fdb_vfs picoquic_vendored weft::interactor)
 target_compile_options(queen PRIVATE -Wall -Wextra)
 set_target_properties(queen PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
