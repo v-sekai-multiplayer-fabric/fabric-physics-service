@@ -42,7 +42,7 @@ target_link_libraries(weft_fdb_vfs PUBLIC ${FDB_LIBRARY} ${SQLITE_LIBRARY} Threa
 # below say how the bytes got here.
 add_subdirectory(thirdparty/interactor)
 
-add_executable(queen src/queen.c src/planner.cpp src/interactor.c src/transport_tcp.c src/wt.c)
+add_executable(queen src/queen.c src/planner.cpp src/interactor.c src/wt.c)
 target_include_directories(queen PRIVATE src thirdparty/taskweft)
 target_link_libraries(queen PRIVATE weft_fdb_vfs picoquic_vendored weft::interactor)
 target_compile_options(queen PRIVATE -Wall -Wextra)

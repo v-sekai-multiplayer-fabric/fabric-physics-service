@@ -32,7 +32,6 @@
 #include "interactor.h"
 #include "planner.h"
 #include "rng.h"
-#include "transport_tcp.h"
 #include "ward.h"
 #include "wire.h"
 #include "wt.h"
@@ -1081,55 +1080,50 @@ done:
 
 static int serve(int port, int nsparks, uint64_t seed) {
 	struct pollfd fds[MAX_FDS];
-	weft_transport_t tr[2];
+	weft_transport_t tr[1];
 	int ntr = 0, rc;
 	gyre_t g;
-	tcp_t *tcp;
-	wt_t *wt = NULL;
+	wt_t *wt;
+
+	// One transport, and it is WebTransport. There was a line-framed TCP server beside it, kept
+	// as the path that worked without a certificate, and it is gone: a service with two
+	// transports is a service with two sets of framing rules, two things to keep in step with
+	// the client, and a quiet fallback that is reached exactly when the credential everybody
+	// assumed was present is not. The fabric's clients speak WebTransport — `fabric-godot-service`
+	// dials it, `fabric-gateway-edge` terminates it — and a second door into the same ward was
+	// only ever a convenience for typing at it by hand.
+	//
+	// So a missing certificate is a refusal now rather than a downgrade. A ward that fell back
+	// to plaintext because a secret failed to mount is the failure this shape exists to make
+	// impossible: it would come up, answer, and look exactly like success.
+	const char *cert = getenv("QUEEN_TLS_CERT"), *key = getenv("QUEEN_TLS_KEY");
+	const char *bind_addr = getenv("QUEEN_WT_BIND");
+	const char *wt_port = getenv("QUEEN_WT_PORT");
+
+	if (!cert || !key) {
+		fprintf(stderr, "the ward serves WebTransport and nothing else, so it needs"
+		                " QUEEN_TLS_CERT and QUEEN_TLS_KEY. picoquic takes file paths rather"
+		                " than PEM buffers: a deployment holding the PEM in a secret writes it"
+		                " to disk first, which `fly/entrypoint.sh` does.\n");
+		return 2;
+	}
 
 	memset(&g, 0, sizeof g);
 	if (found_ward(&g, "gyre-live", nsparks, seed, 0)) return 1;
 
 	const weft_interactor_t in = ward_interactor(&g);
-	if (!(tcp = tcp_open(port, in))) {
+	if (!(wt = wt_open(wt_port ? atoi(wt_port) : port, bind_addr, cert, key, in))) {
+		fprintf(stderr, "the ward has no WebTransport to open\n");
 		close_ward(&g);
 		return 1;
 	}
-	printf("the ward is open on port %d, with %d Sparks and seed %llu\n", port, nsparks,
-	       (unsigned long long)seed);
+	printf("the ward is open on port %d over WebTransport, with %d Sparks and seed %llu\n",
+	       wt_port ? atoi(wt_port) : port, nsparks, (unsigned long long)seed);
 	fflush(stdout);
 
-	// The transport a browser can reach, when it has a certificate to present. picoquic takes
-	// file paths and not PEM buffers, so a deployment that keeps the PEM in a secret writes it
-	// to disk first — `gateway-edge/TRANSPORT.md` records that, and so does `fly/entrypoint.sh`.
-	//
-	// Absent a cert this is the TCP line server alone, and it says so rather than pretending.
-	// That is a missing credential and not a door: the same code path runs either way, and the
-	// interactor the two are handed is the same one.
-	{
-		const char *cert = getenv("QUEEN_TLS_CERT"), *key = getenv("QUEEN_TLS_KEY");
-		const char *bind_addr = getenv("QUEEN_WT_BIND");
-		const char *wt_port = getenv("QUEEN_WT_PORT");
-		if (cert && key) {
-			wt = wt_open(wt_port ? atoi(wt_port) : port + 1, bind_addr, cert, key, in);
-			if (!wt) {
-				fprintf(stderr, "the ward has no WebTransport, and a cert was given\n");
-				tcp_close(tcp);
-				close_ward(&g);
-				return 1;
-			}
-		} else {
-			printf("no QUEEN_TLS_CERT and QUEEN_TLS_KEY, so no WebTransport: TCP only\n");
-			fflush(stdout);
-		}
-	}
+	tr[ntr++] = wt_transport(wt);
 
-	// WebTransport goes first, because picoquic's timer is how a connection that has gone quiet
-	// is retransmitted to or timed out, and a ward with nobody typing is the ordinary case.
-	if (wt) tr[ntr++] = wt_transport(wt);
-	tr[ntr++] = tcp_transport(tcp);
-
-	while (!tcp_stopped(tcp) && !(wt && wt_stopped(wt))) {
+	while (!wt_stopped(wt)) {
 		int owner[MAX_FDS], n = 0;
 
 		// Asked afresh every time round, because a listener's set changes as clients arrive and

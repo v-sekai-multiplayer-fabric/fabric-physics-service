@@ -128,6 +128,23 @@ WebTransport needs no framing layer. A datagram is one message. A stream FIN is 
 
 Do not propose `webtransportd`. The Queen terminates QUIC in her own process.
 
+## One transport
+
+WebTransport is the only transport. Do NOT add a second one — not TCP, not raw UDP, not ENet,
+not WebSocket — and do not restore the line-framed TCP server that used to sit beside it.
+
+A service with two transports has two sets of framing rules and two things to keep in step with
+every client. WebTransport supplies its own boundaries and the TCP server had to invent a length
+prefix to make up for having none, so the two never agreed about what a message was.
+
+`serve` MUST refuse to start without `QUEEN_TLS_CERT` and `QUEEN_TLS_KEY`. It used to fall back
+to the plaintext TCP server when they were absent, which is the failure this rule exists to
+prevent: a ward whose secret failed to mount would come up, answer, and look exactly like
+success. A missing credential is a refusal, not a downgrade.
+
+picoquic takes file paths rather than PEM buffers. A deployment holding the PEM in a secret
+writes it to disk first; `fly/entrypoint.sh` does that.
+
 ## Vendored code
 
 `thirdparty/` holds vendored subtrees.
