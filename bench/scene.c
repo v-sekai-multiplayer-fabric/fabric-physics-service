@@ -47,7 +47,7 @@ static void say(out_t *o, const char *fmt, ...) {
 	o->n += (size_t)n;
 }
 
-char *gaffer_scene(int players, int cubes, int stack, int iters, int ls_iters,
+char *gaffer_scene(int players, int cubes, int stack, int pile, int iters, int ls_iters,
                    double timestep) {
 	out_t o;
 	size_t cap;
@@ -55,7 +55,7 @@ char *gaffer_scene(int players, int cubes, int stack, int iters, int ls_iters,
 	int side;
 	int towers;
 
-	if (players < 0 || cubes < 0 || stack < 0 || iters < 0 || ls_iters < 0 || entities < 1 ||
+	if (players < 0 || cubes < 0 || stack < 0 || pile < 0 || iters < 0 || ls_iters < 0 || entities < 1 ||
 	    timestep <= 0)
 		return NULL;
 
@@ -93,25 +93,47 @@ char *gaffer_scene(int players, int cubes, int stack, int iters, int ls_iters,
 	//
 	// Towers are laid on the same grid, spaced by the cube's own width plus a margin so that
 	// neighbouring towers can lean without starting interpenetrated.
-	towers = stack > 1 ? (cubes + stack - 1) / stack : (cubes > 0 ? cubes : 1);
+	// Three shapes, and two of them exist to fail.
+	//
+	// `pile` is pyramids. It is the reproduction case for the limits work: a pyramid stands
+	// because every cube rests on others, so it is the arrangement with the most contacts there
+	// is — 100 cubes make 1345, 400 make 6435 and run at a fiftieth of realtime. Neither an
+	// iteration cap nor the sleep flag moves it.
+	//
+	// `stack` is columns, which fail differently: fifty cubes is fifty to one, and nothing stands
+	// at fifty to one. It ejects rather than topples.
+	//
+	// Both are kept and both are named, because a sandbox will see them. This is not an
+	// adversarial case needing somebody to mean it — with enough players every buildable shape
+	// gets built, and a bound demonstrated only on the flat field is a bound demonstrated on the
+	// case that was never going to be the problem.
+	const int per_pyramid = pile > 1 ? pile * (pile + 1) * (2 * pile + 1) / 6 : 1;
+	int per_group = pile > 1 ? per_pyramid : (stack > 1 ? stack : 1);
+	towers = (cubes + per_group - 1) / per_group;
+	if (towers < 1) towers = 1;
 	side = 1;
 	while (side * side < towers) side++;
-	// Towers need room to be towers. At the field's 0.6 m pitch a 0.4 m cube leaves 0.2 m between
-	// neighbours, and eighteen of them stand shoulder to shoulder as one slab — which renders as
-	// a wall and collapses as a wall, shearing rather than toppling. That is a different physics
-	// problem from the article's, where a stack is something a player can walk around and knock
-	// over on its own. So a stacked scene is pitched by its own height: a tower that falls should
-	// be able to land flat without immediately being caught by the next one.
-	const double pitch = stack > 1 ? (stack * CUBE_METRES) * 0.75 : 0.6;
+	const double pitch = pile > 1   ? (pile + 2) * CUBE_METRES * 1.6
+	                   : stack > 1  ? (stack * CUBE_METRES) * 0.75
+	                                : 0.6;
 	for (int i = 0; i < cubes; i++) {
-		int t = stack > 1 ? i / stack : i;          // which tower
-		int level = stack > 1 ? i % stack : 0;      // how far up it
+		int t = i / per_group;
 		int col = t % side, row = t / side;
-		double x = col * pitch - side * pitch * 0.5, y = row * pitch - side * pitch * 0.5;
-		// A hair of gap per level rather than exact contact. Cubes spawned touching are cubes
-		// spawned interpenetrating once the solver rounds, and a run that begins by pushing a
-		// tower apart measures the recovery rather than the stack.
-		double z = 0.3 + level * (CUBE_METRES + 0.002);
+		double ox = col * pitch - side * pitch * 0.5, oy = row * pitch - side * pitch * 0.5;
+		double x = ox, y = oy, z = 0.3;
+
+		if (pile > 1) {
+			// Layer L is (pile - L) square. Exactly touching: the gap a column needs to avoid
+			// interpenetration is the same gap that makes fifty levels free-fall together.
+			int k = i % per_group, level = 0, w = pile;
+
+			while (k >= w * w) { k -= w * w; level++; w--; }
+			x = ox + (k % w - (w - 1) * 0.5) * CUBE_METRES;
+			y = oy + (k / w - (w - 1) * 0.5) * CUBE_METRES;
+			z = 0.2 + level * CUBE_METRES;
+		} else if (stack > 1) {
+			z = 0.3 + (i % per_group) * (CUBE_METRES + 0.002);
+		}
 
 		say(&o, "<body name=\"c%d\" pos=\"%g %g %g\"><freejoint/>", i, x, y, z);
 		say(&o, "<geom type=\"box\" size=\"0.2 0.2 0.2\" mass=\"1\"/></body>");
