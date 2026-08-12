@@ -1326,7 +1326,10 @@ static int serve_command(gyre_t *g, char *line, cbor_t *c, int *stop) {
 		say = "no such command";
 	}
 
-	cb_map(c, 5);
+	// Seven: `ok`, `say`, `honest`, and the four `say_ward` writes. A definite map that
+	// undercounts is not a short reply, it is a malformed one — the client's decoder stops at
+	// the declared pair and the rest of the frame becomes trailing bytes it never sees.
+	cb_map(c, 7);
 	cb_text(c, "ok");
 	cb_bool(c, ok);
 	cb_text(c, "say");
