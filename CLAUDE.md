@@ -53,7 +53,9 @@ code.
 | Constant           | Value | Where                          | What it bounds                        |
 | ------------------ | ----- | ------------------------------ | ------------------------------------- |
 | `SLICE_ENTITIES`   | 64    | `src/queen.c`                  | Entities in one subscriber slice      |
-| `SPARKS_PER_WARD`  | 48    | `src/queen.c`                  | Sparks in one ward                    |
+| `WARD_ENTITIES`    | 1800  | `src/ward.h`                   | Entities in one zone, from `AbyssalSLA.lean` |
+| `WARD_HEADROOM`    | 400   | `src/ward.h`                   | Of those, the ghosts a neighbour replicates in |
+| `SPARKS_PER_WARD`  | 1384  | `src/queen.c`                  | Sparks in one ward                    |
 | `BOARD_SIZE`       | 6     | `src/queen.c`                  | Contracts on the board, plus 3 with the Rails |
 | `MAX_WARDS`        | 8     | `src/queen.c`                  | Wards in one `shard` run              |
 | `TXN_MAX_PARTS`    | 16    | `thirdparty/store-plane/fdb_vfs.c` | Databases in one group commit     |
@@ -143,7 +145,9 @@ byte-identical to its source. Send a fix upstream first. Then vendor the fix.
   branch closes its PR.
 - Put a runbook in the unit file. Put a reason in a code comment. Put a decision in the
   manuals repository. `README.md` is not a manual.
-- Match the comment density of SQLite. Comment why the code does a thing, not what it does.
+- Match the comment density of FoundationDB, which is 12 to 14 percent of non-blank lines in
+  `fdbserver`, `fdbclient` and `flow` at 7.3. Comment why the code does a thing, not what it
+  does. `src/` is above that today and comes down as files are touched, not in a sweep.
 - Print all of a list, or print a count and a note. Do not print part of a list.
 - Do not hardcode an absolute filesystem path. Use an environment variable.
 - Build out of the source tree. The host `build/` is not the container `build/`.

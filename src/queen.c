@@ -66,18 +66,24 @@ int weft_txn_abort(unsigned long long txnid);
 
 #define BOARD_SIZE 6
 
-// ── What fits in one slice ────────────────────────────────────────────────────
+// ── What fits in a ward, and what fits in one slice ───────────────────────────
 //
-// How many entities one subscriber can be sent in one tick. `MAX_SLICE_ENTITIES` in
-// `fabric-fanout-edge/src/fanout.cpp` is 64, and `fanout_one` stops at the cap without
-// saying so: the receiver recovers the count as `len / 100`, so a truncated slice looks
-// exactly like a small one.
-//
-// The ward's fixed entities come out of that budget first. Six venues, the Queen, and a full
-// board of nine once the Transit Rails are up. What is left is what the Sparks may have.
-#define SLICE_ENTITIES 64
+// Two budgets, and the ward used to have one. `SPARKS_PER_WARD` was `SLICE_ENTITIES -
+// FIXED_ENTITIES`, so a datagram's width decided how large a world is. The zone's own budget
+// decides it now, less the venues, the Queen and a full board of nine.
 #define FIXED_ENTITIES (NVENUES + 1 + BOARD_SIZE + 3)
-#define SPARKS_PER_WARD (SLICE_ENTITIES - FIXED_ENTITIES)
+#define SPARKS_PER_WARD (WARD_AUTHORITY - FIXED_ENTITIES)
+
+// What one subscriber is sent in one tick. `MAX_SLICE_ENTITIES` in
+// `fabric-fanout-edge/src/fanout.cpp` is 64 and `fanout_one` stops there without saying so:
+// the receiver recovers the count as `len / 100`, so a truncated slice looks like a small one.
+//
+// A zone does not fit in a slice and is not meant to — `InterestCapacity` alone is 400. Which
+// entities reach a subscriber is the fanout's choice and no longer this file's, and the ward
+// cannot make it because it does not know where a subscriber is standing. Until `fanout_one`
+// selects, the venues are no longer guaranteed a place in the slice. That guarantee was the
+// derivation above, and the derivation was the bug.
+#define SLICE_ENTITIES 64
 
 // ── The clock ─────────────────────────────────────────────────────────────────
 //
@@ -200,7 +206,7 @@ static sqlite3 *open_db(const char *name) {
 // with, and it is also arriving for the ones the Broadcast Row brings later — the same act
 // either way, which is the point of a Spark being a database rather than a row in one.
 //
-// A ward may not take more than its slice can carry. Beyond that the answer is a second ward,
+// A ward may not take more than its zone can hold. Beyond that the answer is a second ward,
 // not a fuller one.
 static int join_ward(gyre_t *g, int id) {
 	char name[128], sql[512];
@@ -258,7 +264,8 @@ int found_ward(gyre_t *g, const char *prefix, int nsparks, uint64_t seed, int ba
 	// domain, and the reason a wire id is a column and not a thing the process computes and
 	// keeps to itself.
 	if (run(g->ward,
-	        "CREATE TABLE ward(cycle INT, treasury INT, debt INT, issued INT, retired INT);"
+	        "CREATE TABLE ward(cycle INT, treasury INT, debt INT, issued INT, retired INT,"
+	        "                  x INT, y INT, z INT, wire INT UNIQUE, owner INT);"
 	        "CREATE TABLE venue(id INT PRIMARY KEY, name TEXT, cost INT, built INT,"
 	        "                   x INT, y INT, z INT, wire INT UNIQUE, owner INT);"
 	        "CREATE TABLE board(id INTEGER PRIMARY KEY, cycle INT, kind TEXT, payout INT,"
@@ -292,8 +299,14 @@ int found_ward(gyre_t *g, const char *prefix, int nsparks, uint64_t seed, int ba
 	g->seed = seed;
 	rng_seed(&g->rng, seed);
 
-	snprintf(sql, sizeof sql, "INSERT INTO ward VALUES (0, %d, %d, %d, 0)", g->treasury,
-	         g->debt, g->issued);
+	// The Queen's own row, and she is an entity like the rest: the ward is the only table with
+	// one of her, so it carries her place and her name.
+	const place_t q = nonphysical_place(WIRE_QUEEN);
+	snprintf(sql, sizeof sql,
+	         "INSERT INTO ward VALUES (0, %d, %d, %d, 0, %" PRId64 ", %" PRId64 ", %" PRId64
+	         ", %u, %u)",
+	         g->treasury, g->debt, g->issued, q.x, q.y, q.z,
+	         wire_id(g->ward_no, WIRE_QUEEN), class_owner(CLASS_QUEEN, g->ward_no));
 	if (run(g->ward, sql)) return 1;
 
 	for (int i = 0; i < nsparks; i++) {
@@ -304,7 +317,7 @@ int found_ward(gyre_t *g, const char *prefix, int nsparks, uint64_t seed, int ba
 
 // `SPARKS_PER_WARD` is derived from the venue table, which is this file's, so a caller outside
 // it asks rather than carries a copy of the number. `MAX_SPARKS` bounds the array and this
-// bounds the slice; whichever is nearer is the answer, because `join_ward` refuses at both.
+// bounds the zone; whichever is nearer is the answer, because `join_ward` refuses at both.
 int ward_room(const gyre_t *g) {
 	const int room = (MAX_SPARKS < SPARKS_PER_WARD ? MAX_SPARKS : SPARKS_PER_WARD) - g->nsparks;
 	return room > 0 ? room : 0;
@@ -692,8 +705,8 @@ int cycle(gyre_t *g) {
 	// untouched: an arrival adds a database, not scrip. Arrivals are on the cycle count and
 	// draw nothing from the RNG, so the stream is where it was.
 	//
-	// It stops at the slice. That ceiling was a constant nobody reached; now it is the thing
-	// that ends the ward's growth, and past it the answer is a second ward.
+	// It stops at the zone's authority budget. At 48 that ceiling was reached in a few hundred
+	// cycles; at 1384 no run CI has time for will reach it.
 	// The arrival is deliberately outside the group. `join_ward` founds a database and
 	// creates its tables, and a brand new participant joining a group that is already open
 	// would stage DDL against a head that did not exist when the group began. It draws
@@ -824,9 +837,10 @@ static unsigned long long fingerprint(gyre_t *g) {
 
 // ── More than one ward ────────────────────────────────────────────────────────
 //
-// A ward holds SPARKS_PER_WARD Sparks, because that is what one subscriber's slice can carry
-// alongside the venues, the Queen and the board. A game larger than that is more than one
-// ward, each its own service on its own machine, and FoundationDB underneath them all.
+// A ward holds SPARKS_PER_WARD Sparks, because that is what a zone's authority budget leaves
+// after the venues, the Queen and the board. A game larger than that is more than one ward,
+// each its own service on its own machine, and FoundationDB underneath them all. `AbyssalSLA`
+// puts seven of them on a server of eight cores, which is what `MAX_WARDS` is for.
 //
 // The join costs nothing to arrange. A Spark is its own database whose pages are in
 // FoundationDB, so the receiving ward opens it with no copy and no restore, which is the
@@ -966,12 +980,19 @@ static int play(const char *prefix, int cycles, int nsparks, uint64_t seed, gyre
 
 #define MAX_WARDS 8
 
+// The last Spark of the last ward has to land below the board's range. A build that overran
+// would hand a Spark and a contract one `global_id`, which `wire_id` cannot catch because both
+// are legal locals.
+_Static_assert(WIRE_SPARK_BASE + (unsigned)(MAX_WARDS * SPARKS_PER_WARD) <= WIRE_CONTRACT_BASE,
+               "the Sparks of MAX_WARDS wards overrun WIRE_CONTRACT_BASE");
+_Static_assert(FIXED_ENTITIES + SPARKS_PER_WARD <= WARD_AUTHORITY,
+               "a full ward exceeds the zone's authority budget");
+
 // Play a game too large for one ward. Found as many wards as it takes, split the Sparks
 // between them, and run them together. Halfway through, move a Spark from the first ward to
 // the second, because a game that shards and cannot migrate has only moved the problem.
 static int shard(int cycles, int nsparks, uint64_t seed) {
 	const int nwards = (nsparks + SPARKS_PER_WARD - 1) / SPARKS_PER_WARD;
-	gyre_t w[MAX_WARDS];
 	int rc = 1;
 
 	if (nwards > MAX_WARDS) {
@@ -979,7 +1000,14 @@ static int shard(int cycles, int nsparks, uint64_t seed) {
 		        MAX_WARDS);
 		return 2;
 	}
-	memset(w, 0, sizeof w);
+
+	// On the heap: `gyre_t` carries `MAX_SPARKS` Sparks inline, so eight wards is half a
+	// megabyte of stack where it was twenty-four kilobytes.
+	gyre_t *w = calloc(MAX_WARDS, sizeof *w);
+	if (!w) {
+		fprintf(stderr, "no room for %d wards\n", nwards);
+		return 1;
+	}
 
 	for (int i = 0, placed = 0; i < nwards; i++) {
 		char prefix[32];
@@ -987,7 +1015,10 @@ static int shard(int cycles, int nsparks, uint64_t seed) {
 		if (take > SPARKS_PER_WARD) take = SPARKS_PER_WARD;
 		snprintf(prefix, sizeof prefix, "gyre-shard-%d", i);
 		// A seed of its own, so two wards do not play the same cycle twice over.
-		if (found_ward(&w[i], prefix, take, seed + (uint64_t)i, placed)) return 1;
+		if (found_ward(&w[i], prefix, take, seed + (uint64_t)i, placed)) {
+			free(w);
+			return 1;
+		}
 		placed += take;
 	}
 	printf("\n  %d Sparks across %d wards, %d to a ward\n", nsparks, nwards, SPARKS_PER_WARD);
@@ -1024,6 +1055,7 @@ static int shard(int cycles, int nsparks, uint64_t seed) {
 
 done:
 	for (int i = 0; i < nwards; i++) close_ward(&w[i]);
+	free(w);
 	return rc;
 }
 
@@ -1147,17 +1179,15 @@ int main(int argc, char **argv) {
 	const uint64_t seed = (argc > 3) ? strtoull(argv[3], NULL, 10) : 20260811;
 	const int nsparks = (argc > 4) ? atoi(argv[4]) : 8;
 
-	// One ward is one service, and one service is what one subscriber's slice can carry. Past
-	// that the answer is a second ward on its own machine, joined underneath by FoundationDB,
-	// rather than a bigger slice: the pages are already shared, so a Spark moves between wards
-	// with no copy and no restore. Refusing here is the point. A ward that quietly exceeded
-	// the budget would drop its venues out of every slice and look healthy doing it.
+	// One ward is one zone. Past that the answer is a second ward on its own machine, joined
+	// underneath by FoundationDB: the pages are already shared, so a Spark moves between wards
+	// with no copy and no restore.
 	if (strcmp(mode, "shard") != 0 && nsparks > SPARKS_PER_WARD) {
 		fprintf(stderr,
-		        "%d Sparks is more than one ward may hold. A subscriber's slice is %d"
-		        " entities, and %d of those are the venues, the Queen and a full board,"
-		        " so a ward holds %d Sparks. Run `queen shard` instead.\n",
-		        nsparks, SLICE_ENTITIES, FIXED_ENTITIES, SPARKS_PER_WARD);
+		        "%d Sparks is more than one ward may hold. A zone is %d entities, %d of"
+		        " those are the ghost budget, and %d are the venues, the Queen and a full"
+		        " board, so a ward holds %d Sparks. Run `queen shard` instead.\n",
+		        nsparks, WARD_ENTITIES, WARD_HEADROOM, FIXED_ENTITIES, SPARKS_PER_WARD);
 		return 2;
 	}
 
