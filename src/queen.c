@@ -264,7 +264,8 @@ int found_ward(gyre_t *g, const char *prefix, int nsparks, uint64_t seed, int ba
 	// domain, and the reason a wire id is a column and not a thing the process computes and
 	// keeps to itself.
 	if (run(g->ward,
-	        "CREATE TABLE ward(cycle INT, treasury INT, debt INT, issued INT, retired INT);"
+	        "CREATE TABLE ward(cycle INT, treasury INT, debt INT, issued INT, retired INT,"
+	        "                  x INT, y INT, z INT, wire INT UNIQUE, owner INT);"
 	        "CREATE TABLE venue(id INT PRIMARY KEY, name TEXT, cost INT, built INT,"
 	        "                   x INT, y INT, z INT, wire INT UNIQUE, owner INT);"
 	        "CREATE TABLE board(id INTEGER PRIMARY KEY, cycle INT, kind TEXT, payout INT,"
@@ -298,8 +299,14 @@ int found_ward(gyre_t *g, const char *prefix, int nsparks, uint64_t seed, int ba
 	g->seed = seed;
 	rng_seed(&g->rng, seed);
 
-	snprintf(sql, sizeof sql, "INSERT INTO ward VALUES (0, %d, %d, %d, 0)", g->treasury,
-	         g->debt, g->issued);
+	// The Queen's own row, and she is an entity like the rest: the ward is the only table with
+	// one of her, so it carries her place and her name.
+	const place_t q = nonphysical_place(WIRE_QUEEN);
+	snprintf(sql, sizeof sql,
+	         "INSERT INTO ward VALUES (0, %d, %d, %d, 0, %" PRId64 ", %" PRId64 ", %" PRId64
+	         ", %u, %u)",
+	         g->treasury, g->debt, g->issued, q.x, q.y, q.z,
+	         wire_id(g->ward_no, WIRE_QUEEN), class_owner(CLASS_QUEEN, g->ward_no));
 	if (run(g->ward, sql)) return 1;
 
 	for (int i = 0; i < nsparks; i++) {
