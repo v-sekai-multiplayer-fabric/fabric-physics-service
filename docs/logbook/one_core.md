@@ -438,9 +438,27 @@ Morton is a bit permutation and therefore GF(2)-linear. A butterfly overlay is t
 spatial translation rather than an arbitrary jump. Hilbert is not linear, because each level's
 rotation is chosen by the prefix.
 
-What Hilbert buys is contiguity, and the cluster counts are the price of doing without it: a
-Hilbert code prefix stays a compact region, which is what zone spans, bucket ranges and geometric
-authority are all built on.
+What Hilbert buys is locality **on query windows only**, and the cluster counts are the price of
+doing without it.
+
+It does not partition better, which is what this entry first claimed. Cutting the code space into
+equal contiguous ranges — how `Fabric.lean` assigns entities by prefix — costs the same seams
+under either curve at every zone count tried:
+
+| zones | row-major | Morton | Hilbert |
+| ---: | ---: | ---: | ---: |
+| 4 | 48 | **32** | **32** |
+| 16 | 240 | **96** | **96** |
+| 64 | 288 | **224** | **224** |
+
+The query metric alone is a trap, and row-major is the proof: it beats Morton on 3×3 windows
+while costing 240 seams against 96. Measuring at a two-way split hides this, because every curve
+gives a half-rectangle there and all three tie at 16.
+
+Morton is not optimal among linear curves either. Exhaustively over all 720 bit permutations at
+order 3, one clusters 15% better at equal seam cost — but it does not survive to order 4, where
+the best that still ties on seams is only 3% better. **15% to 3% across one doubling** is why
+Morton stays rather than a second addressing scheme being introduced.
 
 Neither is the other's dual. (ℤ/2)ⁿ is Pontryagin self-dual, so Morton's structure is its own
 dual — which is why a butterfly can be transposed and run in reverse at all. Hilbert has no
@@ -449,7 +467,8 @@ characters to dualise. **They are complements, not alternatives**, and carrying 
 ### What this does not say
 
 - The curve figures are exact and proved by `native_decide` on 8×8 and 16×16 grids. Whether the
-  ratio holds at the 30-bit codes actually used is not proved, only expected.
+  ratios hold at the 30-bit codes actually used is not proved — and the one trend that was checked
+  across a doubling **shrank**, so extrapolating them upward is not safe.
 - The 1600/4096 is worth noticing: Hilbert satisfies the linearity identity for a large minority
   of pairs, so **sampling a few pairs would make it look linear**. An earlier throwaway check with
   a wrong reflection term reported 146/4000 and would have supported the same conclusion for the
