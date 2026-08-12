@@ -1,0 +1,155 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "fabric-physics-service: server-authoritative networked physics for one ward"
+abstract: >
+  A server-authoritative networked physics service for one zone of the V-Sekai
+  multiplayer fabric, after Glenn Fiedler's networked physics in virtual reality
+  with the authority moved to the server. A ward is a SQLite database over a VFS
+  whose pages live in FoundationDB, so no client opens a database and authority
+  never moves; what is left of the original design is the part that was never
+  about trust, the priority accumulator that chooses which bodies a subscriber
+  hears about in a tick. Bodies are stepped by MuJoCo and published as the
+  100-byte integral XRGridEntityPacket, twenty times a second, within a
+  1800-entity zone budget.
+authors:
+  - family-names: Lee
+    given-names: "K. S. Ernest (iFire)"
+    email: ernest.lee@chibifire.com
+    orcid: "https://orcid.org/0000-0003-4570-1436"
+version: 0.1.0-dev.1
+date-released: "2026-08-12"
+license: Apache-2.0
+repository-code: "https://github.com/v-sekai-multiplayer-fabric/fabric-physics-service"
+keywords:
+  - networked-physics
+  - server-authoritative
+  - multiplayer
+  - mujoco
+  - foundationdb
+  - virtual-reality
+
+# What this repository is built on.
+#
+# It is more borrowed than written, and that is worth saying somewhere a reader or a tool can
+# follow rather than in prose that mentions each piece once. Every entry below is something the
+# repository would not work without: the design it implements, the code it clones or vendors,
+# and the specification its wire format is held to.
+references:
+
+  # ── The design ───────────────────────────────────────────────────────────────
+
+  - type: article
+    title: "Networked Physics in Virtual Reality"
+    authors:
+      - family-names: Fiedler
+        given-names: Glenn
+    year: 2018
+    url: "https://gafferongames.com/post/networked_physics_in_virtual_reality/"
+    notes: >
+      The design this service implements with the authority moved to the server.
+      An avatar is three tracked objects, a head and two hands; cubes carry an
+      authority sequence and a stronger ownership sequence. The three-object
+      avatar is the entity count this repository's benchmark measures against.
+
+  # ── The code it is made of ───────────────────────────────────────────────────
+
+  - type: software
+    title: "fabric-store-domain: the ward, the store plane, and the game that is their tenant"
+    authors:
+      - family-names: Lee
+        given-names: "K. S. Ernest (iFire)"
+        orcid: "https://orcid.org/0000-0003-4570-1436"
+    year: 2026
+    url: "https://github.com/v-sekai-multiplayer-fabric/fabric-store-domain"
+    notes: "This repository is a clone of it, and still holds its two planes."
+
+  - type: software
+    title: "MuJoCo: a physics engine for model-based control"
+    authors:
+      - name: "Google DeepMind"
+    year: 2025
+    version: "3.11.0"
+    license: Apache-2.0
+    url: "https://github.com/google-deepmind/mujoco"
+    notes: >
+      Vendored through mujoco-riscv64 as thirdparty/mujoco-riscv64, pinned to
+      commit b85fdca54f0e0038b804af146a0b4e94199e00d0 (tag 3.11.0).
+
+  - type: software
+    title: "mujoco-riscv64: a riscv64 build of MuJoCo with libriscv host bindings"
+    authors:
+      - family-names: Lee
+        given-names: "K. S. Ernest (iFire)"
+        orcid: "https://orcid.org/0000-0003-4570-1436"
+    year: 2026
+    url: "https://github.com/v-sekai-multiplayer-fabric/mujoco-riscv64"
+    notes: "The vendored subtree, carrying MuJoCo and the mj_physics wiring."
+
+  - type: software
+    title: "fabric-interactor: the interactor contract, a command in and reply bytes out"
+    authors:
+      - family-names: Lee
+        given-names: "K. S. Ernest (iFire)"
+        orcid: "https://orcid.org/0000-0003-4570-1436"
+    year: 2026
+    url: "https://github.com/v-sekai-multiplayer-fabric/fabric-interactor"
+
+  - type: software
+    title: "fabric-store-plane: SQLite over a VFS whose pages live in FoundationDB"
+    authors:
+      - family-names: Lee
+        given-names: "K. S. Ernest (iFire)"
+        orcid: "https://orcid.org/0000-0003-4570-1436"
+    year: 2026
+    url: "https://github.com/v-sekai-multiplayer-fabric/fabric-store-plane"
+
+  - type: software
+    title: "fabric-gateway-edge: terminates the client transport and hands the result to a plane"
+    authors:
+      - family-names: Lee
+        given-names: "K. S. Ernest (iFire)"
+        orcid: "https://orcid.org/0000-0003-4570-1436"
+    year: 2026
+    url: "https://github.com/v-sekai-multiplayer-fabric/fabric-gateway-edge"
+
+  # ── The specifications its numbers come from ─────────────────────────────────
+
+  - type: software
+    title: "lean-entity-packet: the 100-byte integral entity wire packet, proved"
+    authors:
+      - family-names: Lee
+        given-names: "K. S. Ernest (iFire)"
+        orcid: "https://orcid.org/0000-0003-4570-1436"
+    year: 2026
+    url: "https://github.com/v-sekai-multiplayer-fabric/lean-entity-packet"
+    notes: "XRGridEntityPacket: what an entity costs on the wire, and in what units."
+
+  - type: software
+    title: "lean-fabric-protocol: saturation, waypoint bounds, and the abyssal SLA"
+    authors:
+      - family-names: Lee
+        given-names: "K. S. Ernest (iFire)"
+        orcid: "https://orcid.org/0000-0003-4570-1436"
+    year: 2026
+    url: "https://github.com/v-sekai-multiplayer-fabric/lean-fabric-protocol"
+    notes: "AbyssalSLA.lean is where WARD_ENTITIES, the 1800, is sized."
+
+  - type: software
+    title: "lean-interest-mgmt: authority-interest and solve order, who sees whom"
+    authors:
+      - family-names: Lee
+        given-names: "K. S. Ernest (iFire)"
+        orcid: "https://orcid.org/0000-0003-4570-1436"
+    year: 2026
+    url: "https://github.com/v-sekai-multiplayer-fabric/lean-interest-mgmt"
+    notes: "AuthorityInterest.lean is where WARD_HEADROOM, the 400 ghosts, is reserved."
+
+  - type: software
+    title: "lean-spatial-oracle: predictive BVH, ghost expansion, and SAH proofs"
+    authors:
+      - family-names: Lee
+        given-names: "K. S. Ernest (iFire)"
+        orcid: "https://orcid.org/0000-0003-4570-1436"
+    year: 2026
+    url: "https://github.com/v-sekai-multiplayer-fabric/lean-spatial-oracle"
+    notes: "The int64-micrometre AABB space the packet's positions share, and V_MAX."

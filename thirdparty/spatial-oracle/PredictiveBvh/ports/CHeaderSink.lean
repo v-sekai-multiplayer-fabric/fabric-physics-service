@@ -1,0 +1,6 @@
+-- SPDX-License-Identifier: MIT
+-- CHeaderSink — DRIVEN (secondary) port: the proved ghost-bound formula emitted out as C.
+-- The codegen adapter implements it, writing predictive_bvh.h.
+--
+-- Port contract stub: define the narrow interface the core depends on and an
+-- adapter implements. Kept at the lowest common denominator across bindings.

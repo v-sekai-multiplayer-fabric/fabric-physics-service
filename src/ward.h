@@ -12,17 +12,14 @@
 #define QUEEN_WARD_H
 
 #include "rng.h"
+#include "budget.h"
 #include "wire.h"
 
 #include <sqlite3.h>
 #include <stdint.h>
 
-// A ward is a zone. `AbyssalSLA.lean` sizes one at `entitiesPerZone`, and
-// `AuthorityInterest.lean` reserves `InterestCapacity` of it for ghosts a neighbour
-// replicates in — those are not this ward's to spend, so a Spark comes out of the rest.
-#define WARD_ENTITIES 1800
-#define WARD_HEADROOM 400
-#define WARD_AUTHORITY (WARD_ENTITIES - WARD_HEADROOM)
+// The zone's entity budget is in `budget.h`, which costs no dependency to include. It is still
+// reached through this header for anything that already has a ward.
 
 // The array bound. `SPARKS_PER_WARD` is narrower and `queen.c` owns it, because the venue
 // table it subtracts is that file's; `join_ward` refuses at both.

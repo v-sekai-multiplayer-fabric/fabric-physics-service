@@ -12,7 +12,9 @@ body, and the priority accumulator that decides which bodies a subscriber hears 
 on top of the ward, not beside it.
 
 `README.md` gives the design. The comments in `src/queen.c` give the reasons. Record decisions
-in the `multiplayer-fabric-manuals` repository.
+in the `multiplayer-fabric-manuals` repository. `CITATION.cff` says what this repository is built
+on — the design it implements, the code it clones and vendors, and the specifications its numbers
+come from. Add a dependency there when you add one here.
 
 ## Build
 

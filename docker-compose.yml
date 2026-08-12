@@ -29,5 +29,15 @@ services:
       WEFT_FDB_CLUSTER_FILE: /etc/foundationdb/fdb.cluster
       CI_MODE: shell
 
+  # `docker compose run --rm bench` builds MuJoCo and asks how many players fit on one core.
+  # It is its own service rather than a flag on `ci` because it is a long build the play run
+  # does not need, and because the answer is a number to read rather than a check to pass.
+  bench:
+    <<: *ci
+    environment:
+      FDB_VERSION: "7.3.76"
+      WEFT_FDB_CLUSTER_FILE: /etc/foundationdb/fdb.cluster
+      CI_MODE: bench
+
 volumes:
   fdb-debs:

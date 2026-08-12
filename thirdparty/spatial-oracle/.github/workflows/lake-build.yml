@@ -1,0 +1,42 @@
+name: lake build
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+concurrency:
+  group: lake-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Setup: install toolchain, fetch the Mathlib cache (arrives transitively
+      # via truth_research_zk), and resolve+clone the dependency graph
+      # (lean-shared-core, lean-rebac-core, truth_research_zk) by building the
+      # production lib. AmoLean (from truth_research_zk) is pure Lean — no native
+      # SDK vendoring is required for the bvh-codegen exe.
+      - name: setup toolchain + cache + clone deps (PredictiveBvh)
+        uses: leanprover/lean-action@v1
+        with:
+          build-args: "PredictiveBvh"
+          test: false
+          lint: false
+          use-mathlib-cache: true
+
+      # Default target = the bvh-codegen exe. This is the production-relevant
+      # signal: it's what writes predictive_bvh.h.
+      - name: lake build (default target, bvh-codegen)
+        run: lake build
+
+      # Research-tier optimal-partition proofs: built for signal, NOT gating.
+      - name: lake build Research (non-gating)
+        continue-on-error: true
+        run: lake build Research
