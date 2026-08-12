@@ -1,8 +1,14 @@
-# The fan-out edge. Not buildable yet, and saying so beats a target that never runs.
+# The fan-out edge.
 #
-# It needs three things it does not have: predictive_bvh.h (codegen, lean-spatial-oracle),
-# the entity packet codec (codegen, lean-entity-packet), and a ring subscription to feed it
-# a tick. Copying the generated headers here would put one decision in two places.
+# It needs two generated headers, and both now exist: predictive_bvh.h in lean-spatial-oracle,
+# and xr_grid_entity_packet.h emitted by lean-entity-packet's `packet_emit` — the second of
+# which this file used to say was missing, which is why nothing here had ever compiled.
+#
+# They are still not copied in. WEFT_GEN_DIR points at wherever the consumer put them, because
+# copying a generated header here would put one decision in two places.
+#
+# What it still has not got is a ring subscription to feed it a tick, so this is a library and
+# not a process.
 cmake_minimum_required(VERSION 3.22)
 project(fabric_fanout_edge CXX)
 
