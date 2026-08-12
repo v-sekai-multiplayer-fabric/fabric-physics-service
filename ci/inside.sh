@@ -38,12 +38,32 @@ fdbcli --exec 'status minimal'
 
 step "Build"
 # Out of the mounted tree: the host is Windows and its build/ is not this one's.
-cmake -S /repo -B /build -DCMAKE_BUILD_TYPE=Release >/dev/null
+#
+# MuJoCo is off unless this run is the benchmark. It is a multi-minute C++ build that `queen`
+# does not link, so paying for it on every play run would slow the check that actually guards
+# the game.
+bench_flag=""
+[ "${CI_MODE:-play}" = bench ] && bench_flag="-DPHYSICS_BENCH=ON"
+cmake -S /repo -B /build -DCMAKE_BUILD_TYPE=Release $bench_flag >/dev/null
 cmake --build /build -j"$(nproc)"
 
 if [ "${CI_MODE:-play}" = shell ]; then
   step "Shell — the cluster is up, ./build is /build"
   exec bash
+fi
+
+if [ "${CI_MODE:-play}" = bench ]; then
+  step "MuJoCo's own free-fall test, run for the first time"
+  ctest --test-dir /build --output-on-failure
+
+  # The article's own shape: four players, and a field of cubes for them to throw. No `--gate`,
+  # so the budget is reported and not asserted — see the comment on `--gate` in bench_players.c.
+  step "Four players and 900 cubes, the shape the article describes"
+  /build/bench_players --players 4 --cubes 900 --ticks 60
+
+  step "How many players that many cubes leaves room for"
+  /build/bench_players --cubes 900 --ramp --ticks 40
+  exit 0
 fi
 
 step "Play a ward, and hold it to its arithmetic"
