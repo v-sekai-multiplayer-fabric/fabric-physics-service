@@ -34,10 +34,18 @@ so those two share a machine. `fabric-asset-edge` does not.
 
 ## State
 
-**Not built.** `src/fanout.cpp` is the interest filter and the packing, carried over from
-`gyreplane` unchanged.
+**Buildable, not deployed.** `src/fanout.cpp` is the interest filter and the packing, carried
+over from `gyreplane` unchanged. Both generated headers it needs now exist —
+`predictive_bvh.h` in `lean-spatial-oracle` and `xr_grid_entity_packet.h` emitted by
+`lean-entity-packet`'s `packet_emit` — so pointing `WEFT_GEN_DIR` at a directory holding
+`predictive_bvh.h` and `gen/xr_grid_entity_packet.h` compiles this. It had never compiled
+before, because the packet codec was a file everything included and nobody had emitted.
 
-It is not a process yet: there is no loop and no transport, only the logic a loop would
-call. It needs `predictive_bvh.h` from `lean-spatial-oracle` and the packet codec from
-`lean-entity-packet`, both generated in the trees that produce them, and it needs the ring
-subscription that feeds it a tick. Until then nothing here compiles, which CMake says.
+One thing a caller must still supply: `aabb_overlaps`. `predictive_bvh.h` declares it and says
+its definition lives in the adapter, so a caller with no Godot in it writes the six comparisons
+itself.
+
+It is not a process yet: there is no loop and no transport, only the logic a loop would call,
+and it needs the ring subscription that feeds it a tick. A caller with neither can still reach
+the real filtering — `fanout_sink_t` takes a counter as happily as a socket, which is how
+`fabric-physics-service`'s one-core benchmark times this without a network.

@@ -18,27 +18,7 @@
  * repo already compiles C++ (see src/sandbox/sandbox_guest.cpp).
  */
 
-#include <cstdint>
-#include <cstddef>
-
-#include "predictive_bvh.h"
-extern "C" {
-#include "gen/xr_grid_entity_packet.h"
-}
-
-/*
- * Delivery seam. WebTransport is not in the container yet, so a subscriber's
- * bytes go through this function pointer. The default is an ordinary h2o send;
- * swap it for a WebTransport datagram sink later without touching the interest
- * logic below.
- */
-typedef void (*fanout_sink_t)(void *subscriber, const uint8_t *buf, size_t len);
-
-struct subscriber_t {
-	Aabb interest;    /* the box this subscriber cares about, in micrometres */
-	void *conn;       /* opaque delivery handle (an h2o generator, a WT session) */
-	fanout_sink_t send;
-};
+#include "fanout.h"
 
 /* Interest tuning, documented so it is not mistaken for magic. */
 static const int64_t ENTITY_EXT_UM = 500000;   /* half-extent treated per entity */
@@ -63,10 +43,6 @@ static Aabb ghost_aabb_of(const xr_grid_entity_packet_t &e)
 	b.max_z = ghost_aabb_max(e.pos_um_z, ENTITY_EXT_UM, vz, ACCEL_HALF_UM, GHOST_TICKS);
 	return b;
 }
-
-/* Cap one subscriber's slice so a single write stays inside a datagram-sized
- * batch. 64 entities * 100 bytes = 6400 bytes, comfortably inside one message. */
-#define MAX_SLICE_ENTITIES 64
 
 /*
  * Fan one tick of the zone out to one subscriber: filter by interest, pack the
