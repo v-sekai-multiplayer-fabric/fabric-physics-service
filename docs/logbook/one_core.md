@@ -174,7 +174,8 @@ is worst, so "we picked a stable geometry" is not a defence and neither is any a
 Two mechanisms, and only the second is a guarantee:
 
 - **Weld settled assemblies.** A stack that has not moved for some frames becomes one body, which
-  is what Roblox does and what turns 1345 contacts into a handful. MuJoCo can do it: `mjSpec` and
+  is what the large commercial sandboxes do and what turns 1345 contacts into a handful. MuJoCo
+  can do it: `mjSpec` and
   `mj_compile` allow the model to be edited and recompiled at runtime. It is deterministic — the
   same state welds the same way everywhere — so the weld rule joins the wire contract beside the
   simulation rate.
