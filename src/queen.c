@@ -29,8 +29,11 @@
 
 #define _POSIX_C_SOURCE 200809L
 
+#include "interactor.h"
 #include "planner.h"
 #include "rng.h"
+#include "transport_tcp.h"
+#include "ward.h"
 #include "wt.h"
 
 #include <sqlite3.h>
@@ -55,7 +58,6 @@ int weft_txn_join(sqlite3 *db, unsigned long long txnid);
 int weft_txn_commit(unsigned long long txnid);
 int weft_txn_abort(unsigned long long txnid);
 
-#define MAX_SPARKS 64
 #define BOARD_SIZE 6
 
 // ── Where things are ──────────────────────────────────────────────────────────
@@ -114,10 +116,6 @@ int weft_txn_abort(unsigned long long txnid);
 
 // How many Sparks the chronicle will name before it stops naming any of them.
 #define SPARKS_SHOWN 8
-
-typedef struct {
-	int64_t x, y, z;
-} place_t;
 
 // ── Names for things ──────────────────────────────────────────────────────────
 //
@@ -251,32 +249,6 @@ static const char *KINDS[] = {"scavenge", "hack",     "repair", "delivery", "sur
                               "courier",  "listening", "salvage", "decommission"};
 #define NKINDS ((int)(sizeof KINDS / sizeof KINDS[0]))
 
-typedef struct {
-	sqlite3 *db;
-	int id;
-	int purse;
-	int wear;
-	place_t at; // where the Frame is standing, in micrometres
-} spark_t;
-
-typedef struct {
-	sqlite3 *ward;
-	spark_t sparks[MAX_SPARKS];
-	int nsparks;
-	rng_t rng;
-	int cycle;
-	int treasury;
-	int debt;
-	int issued;  // every scrip that ever existed
-	int found;   // every piece of salvage this ward accounts for
-	int retired; // every scrip paid to the Debt Clock
-	int spent;   // every scrip paid out of the ward for a venue
-	int ward_no; // which ward of the game this is, and the owner in a wire id
-	char prefix[64]; // what this ward's databases are called, so a Spark can still arrive later
-	uint64_t seed;
-	uint64_t seq; // counts what this ward has named, and feeds the UUIDs
-} gyre_t;
-
 // A name with an apostrophe in it, fit for SQL. The Gyre's own venues are called things
 // like Cycle's End Tavern, and renaming them to dodge a quote would be letting the string
 // escaping choose the fiction.
@@ -300,7 +272,7 @@ static int run(sqlite3 *db, const char *sql) {
 	return 0;
 }
 
-static int scalar(sqlite3 *db, const char *sql) {
+int scalar(sqlite3 *db, const char *sql) {
 	sqlite3_stmt *st;
 	if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return -1;
 	int v = (sqlite3_step(st) == SQLITE_ROW) ? sqlite3_column_int(st, 0) : -1;
@@ -372,7 +344,7 @@ static int join_ward(gyre_t *g, int id) {
 
 // `base` is the id of this ward's first Spark. A Spark keeps its id when it migrates, so the
 // ids have to be unique across every ward of the game rather than only inside one.
-static int found_ward(gyre_t *g, const char *prefix, int nsparks, uint64_t seed, int base) {
+int found_ward(gyre_t *g, const char *prefix, int nsparks, uint64_t seed, int base) {
 	char name[128], sql[512];
 
 	snprintf(name, sizeof name, "%s-ward.db", prefix);
@@ -451,7 +423,7 @@ static int built(gyre_t *g, int venue) {
 // it by typing `/commission`, and it is one function because the accounting must not depend on
 // who asked: a venue bought by hand that skipped the ledger would break `honest()` a cycle
 // later, somewhere else, where nothing would point back here.
-static int build_venue(gyre_t *g, int i) {
+int build_venue(gyre_t *g, int i) {
 	char sql[256];
 	if (i < 0 || i >= NVENUES) return 1;
 	if (g->treasury < VENUES[i].cost) return 1;
@@ -604,7 +576,7 @@ static int choose(gyre_t *g, spark_t *s) {
 // Each participant is an explicit SQLite transaction. Autocommit would let the first write
 // commit on its own at xSync, and then the group would only contain whatever had not been
 // written yet.
-static int pay(gyre_t *g, spark_t *s, int amount, const char *item, const char *kind) {
+int pay(gyre_t *g, spark_t *s, int amount, const char *item, const char *kind) {
 	unsigned long long txn = 0;
 	char sql[256];
 
@@ -648,7 +620,7 @@ give_up:
 
 // ── One cycle ─────────────────────────────────────────────────────────────────
 
-static int cycle(gyre_t *g) {
+int cycle(gyre_t *g) {
 	char sql[256];
 	g->cycle++;
 
@@ -784,7 +756,7 @@ static int purses(gyre_t *g) {
 // Conservation. Scrip is made only by salvage and destroyed only by the Debt Clock, so what
 // exists must be somewhere: in the treasury or in somebody's purse. A sum that does not
 // balance is a payment that landed on one side of a two-database transfer.
-static int honest(gyre_t *g, const char *when) {
+int honest(gyre_t *g, const char *when) {
 	const int held = g->treasury + purses(g) + g->retired + g->spent;
 	if (held != g->issued) {
 		printf("BROKEN at %s: treasury %d + purses %d + retired %d + spent %d = %d,"
@@ -832,7 +804,7 @@ static void chronicle(gyre_t *g) {
 	printf("\n");
 }
 
-static void close_ward(gyre_t *g) {
+void close_ward(gyre_t *g) {
 	for (int i = 0; i < g->nsparks; i++) sqlite3_close(g->sparks[i].db);
 	sqlite3_close(g->ward);
 }
@@ -1095,251 +1067,6 @@ done:
 #define MAX_CLIENTS 64
 #define LINE_MAX_BYTES 512
 #define REPLY_MAX_BYTES 262144
-
-// ── What goes on the wire ─────────────────────────────────────────────────────
-//
-// CBOR, not JSON text. The reply is a batch of entity rows and scalars, and RFC 8949 packs
-// those in a fraction of the bytes while staying self-describing, which is what the control
-// path needs and what a bitpacked struct would give up. Each reply is length-prefixed, so a
-// reader frames it without scanning for a delimiter that could occur inside a venue's name.
-typedef struct {
-	unsigned char *p;
-	size_t n, cap;
-	int over; // the buffer ran out, and every write since has been dropped
-} cbor_t;
-
-static void cb_raw(cbor_t *c, unsigned char b) {
-	if (c->n >= c->cap) {
-		c->over = 1;
-		return;
-	}
-	c->p[c->n++] = b;
-}
-
-// A CBOR head is the major type in the top three bits and the argument in the low five, with
-// the argument spilling into 1, 2, 4 or 8 following bytes as it grows.
-static void cb_head(cbor_t *c, int major, uint64_t v) {
-	const unsigned char m = (unsigned char)(major << 5);
-	if (v < 24) {
-		cb_raw(c, (unsigned char)(m | v));
-	} else if (v <= 0xff) {
-		cb_raw(c, (unsigned char)(m | 24));
-		cb_raw(c, (unsigned char)v);
-	} else if (v <= 0xffff) {
-		cb_raw(c, (unsigned char)(m | 25));
-		for (int i = 1; i >= 0; i--) cb_raw(c, (unsigned char)(v >> (i * 8)));
-	} else if (v <= 0xffffffffULL) {
-		cb_raw(c, (unsigned char)(m | 26));
-		for (int i = 3; i >= 0; i--) cb_raw(c, (unsigned char)(v >> (i * 8)));
-	} else {
-		cb_raw(c, (unsigned char)(m | 27));
-		for (int i = 7; i >= 0; i--) cb_raw(c, (unsigned char)(v >> (i * 8)));
-	}
-}
-
-// A negative number is major type 1 over its own encoding, `-1 - n`. A place is int64 and
-// routinely negative — the Under-Market is thirty metres down — so this is not a spare case.
-static void cb_int(cbor_t *c, int64_t v) {
-	if (v < 0)
-		cb_head(c, 1, (uint64_t)(-(v + 1)));
-	else
-		cb_head(c, 0, (uint64_t)v);
-}
-
-static void cb_text(cbor_t *c, const char *s) {
-	const size_t n = s ? strlen(s) : 0;
-	cb_head(c, 3, n);
-	for (size_t i = 0; i < n; i++) cb_raw(c, (unsigned char)s[i]);
-}
-
-static void cb_map(cbor_t *c, uint64_t pairs) { cb_head(c, 5, pairs); }
-static void cb_array(cbor_t *c, uint64_t items) { cb_head(c, 4, items); }
-static void cb_bool(cbor_t *c, int b) { cb_raw(c, (unsigned char)(b ? 0xf5 : 0xf4)); }
-
-static void cb_kv_int(cbor_t *c, const char *k, int64_t v) {
-	cb_text(c, k);
-	cb_int(c, v);
-}
-
-// ── The ward, as a subscriber sees it ─────────────────────────────────────────
-//
-// Every row carries its `wire` and `owner`, because that is how a client matches this reply to
-// the `XRGridEntityPacket` for the same entity. Matching by position instead would be guessing,
-// and two Sparks standing on one contract would defeat it.
-
-static void say_sparks(cbor_t *c, gyre_t *g) {
-	cb_text(c, "sparks");
-	cb_array(c, (uint64_t)g->nsparks);
-	for (int i = 0; i < g->nsparks; i++) {
-		const spark_t *s = &g->sparks[i];
-		cb_map(c, 8);
-		cb_kv_int(c, "id", s->id);
-		cb_kv_int(c, "purse", s->purse);
-		cb_kv_int(c, "wear", s->wear);
-		cb_kv_int(c, "x", s->at.x);
-		cb_kv_int(c, "y", s->at.y);
-		cb_kv_int(c, "z", s->at.z);
-		cb_kv_int(c, "wire", scalar(s->db, "SELECT wire FROM spark"));
-		cb_kv_int(c, "owner", scalar(s->db, "SELECT owner FROM spark"));
-	}
-}
-
-// The venues and the board come out of the ward in one statement each, so what a client is told
-// is what the database holds rather than what this process remembers.
-static void say_rows(cbor_t *c, gyre_t *g, const char *key, const char *sql, int ncols,
-                     const char *const *cols) {
-	sqlite3_stmt *st;
-	int n = 0;
-
-	cb_text(c, key);
-	if (sqlite3_prepare_v2(g->ward, sql, -1, &st, NULL) != SQLITE_OK) {
-		cb_array(c, 0);
-		return;
-	}
-	// The count has to precede the items in a definite-length array, and the rows only arrive
-	// by stepping. Rather than a second query, write the array head as indefinite and stop it
-	// with a break: RFC 8949 keeps 0x9f/0xff for exactly this, a producer streaming a sequence
-	// whose length it does not know yet.
-	cb_raw(c, 0x9f);
-	while (sqlite3_step(st) == SQLITE_ROW) {
-		cb_map(c, (uint64_t)ncols);
-		for (int i = 0; i < ncols; i++) {
-			cb_text(c, cols[i]);
-			if (sqlite3_column_type(st, i) == SQLITE_TEXT)
-				cb_text(c, (const char *)sqlite3_column_text(st, i));
-			else if (sqlite3_column_type(st, i) == SQLITE_NULL)
-				cb_raw(c, 0xf6);
-			else
-				cb_int(c, sqlite3_column_int64(st, i));
-		}
-		n++;
-	}
-	cb_raw(c, 0xff);
-	sqlite3_finalize(st);
-	(void)n;
-}
-
-// The ward scalars. `/commission` changes a venue and the treasury together, and no interest
-// box can ever carry the second: `treasury`, `debt`, `issued`, `retired` and `spent` have no
-// place, so they ride the reliable control stream instead of a slice. This is that stream.
-static void say_ward(cbor_t *c, gyre_t *g) {
-	static const char *const VCOLS[] = {"id", "name", "cost", "built", "x", "y", "z", "wire", "owner"};
-	static const char *const BCOLS[] = {"id",   "kind", "payout", "risk", "taken",
-	                                    "outcome", "x",  "y",      "z",    "wire", "owner"};
-
-	cb_text(c, "ward");
-	cb_map(c, 8);
-	cb_kv_int(c, "cycle", g->cycle);
-	cb_kv_int(c, "treasury", g->treasury);
-	cb_kv_int(c, "debt", g->debt);
-	cb_kv_int(c, "issued", g->issued);
-	cb_kv_int(c, "retired", g->retired);
-	cb_kv_int(c, "spent", g->spent);
-	cb_kv_int(c, "sparks", g->nsparks);
-	cb_kv_int(c, "room", SPARKS_PER_WARD - g->nsparks);
-
-	say_rows(c, g, "venues",
-	         "SELECT id, name, cost, built, x, y, z, wire, owner FROM venue ORDER BY id", 9, VCOLS);
-	say_rows(c, g, "board",
-	         "SELECT id, kind, payout, risk, taken, outcome, x, y, z, wire, owner FROM board"
-	         " ORDER BY id",
-	         11, BCOLS);
-	say_sparks(c, g);
-}
-
-// ── Commands ──────────────────────────────────────────────────────────────────
-//
-// A filtered menu is a convenience and never an authorization, so the server checks on receipt
-// whatever the client chose to show. What it can check today is the game's own rules — a purse
-// the treasury cannot fill, a venue already standing, a Spark who is not here. The rebac
-// relations that decide who may run `/restart` at all are not wired to this process yet, and
-// pretending otherwise here would be the exact mistake the RFD warns about.
-static int serve_command(gyre_t *g, char *line, cbor_t *c, int *stop) {
-	char *verb = line, *arg1 = NULL, *arg2 = NULL;
-	int ok = 1;
-	const char *say = "";
-
-	while (*verb == '/' || *verb == ' ') verb++;
-	for (char *p = verb; *p; p++) {
-		if (*p != ' ') continue;
-		*p = '\0';
-		if (!arg1) arg1 = p + 1;
-		else if (!arg2) { arg2 = p + 1; break; }
-	}
-
-	if (!strcmp(verb, "look") || !*verb) {
-		// A read changes no entity, so the interest filter never runs and this reaches the
-		// caller alone. It is the one command with no reach at all.
-		say = "the ward as it stands";
-	} else if (!strcmp(verb, "cycle")) {
-		int n = arg1 ? atoi(arg1) : 1;
-		if (n < 1) n = 1;
-		if (n > 64) n = 64; // a command is not a way to run a thousand cycles inside one poll
-		for (int i = 0; i < n; i++) {
-			if (cycle(g)) { ok = 0; say = "the ward stopped mid-cycle"; break; }
-			if (honest(g, "a cycle")) { ok = 0; say = "the ward stopped being honest"; break; }
-		}
-		if (ok) say = "the ward moved";
-	} else if (!strcmp(verb, "commission")) {
-		const int v = arg1 ? atoi(arg1) : -1;
-		if (build_venue(g, v)) {
-			ok = 0;
-			say = "no such venue, or it is already built, or the treasury will not reach";
-		} else {
-			// The venue appears to every box that overlaps its place. The treasury moves with
-			// it and reaches no box at all, which is why both are in this one reply.
-			say = "commissioned";
-		}
-	} else if (!strcmp(verb, "pay")) {
-		const int who = arg1 ? atoi(arg1) : -1;
-		const int amount = arg2 ? atoi(arg2) : 0;
-		spark_t *s = NULL;
-		for (int i = 0; i < g->nsparks; i++)
-			if (g->sparks[i].id == who) s = &g->sparks[i];
-		if (!s || amount <= 0 || g->treasury < amount) {
-			ok = 0;
-			say = "no such Spark here, or an amount the treasury will not reach";
-		} else if (pay(g, s, amount, NULL, NULL)) {
-			ok = 0;
-			say = "the payment landed on neither side";
-		} else {
-			say = "paid";
-		}
-	} else if (!strcmp(verb, "restart")) {
-		// `found_ward` drops and recreates every table, so this re-founds the ward for everyone
-		// at once. No interest box excludes it, and it is the command a menu should hide from a
-		// player who may not run it.
-		const int n = g->nsparks;
-		const uint64_t seed = g->seed;
-		close_ward(g);
-		memset(g, 0, sizeof *g);
-		if (found_ward(g, "gyre-live", n, seed, 0)) {
-			*stop = 1;
-			ok = 0;
-			say = "the ward could not be founded again";
-		} else {
-			say = "the ward is founded again";
-		}
-	} else if (!strcmp(verb, "quit")) {
-		say = "goodbye";
-	} else {
-		ok = 0;
-		say = "no such command";
-	}
-
-	// Seven: `ok`, `say`, `honest`, and the four `say_ward` writes. A definite map that
-	// undercounts is not a short reply, it is a malformed one — the client's decoder stops at
-	// the declared pair and the rest of the frame becomes trailing bytes it never sees.
-	cb_map(c, 7);
-	cb_text(c, "ok");
-	cb_bool(c, ok);
-	cb_text(c, "say");
-	cb_text(c, say);
-	cb_text(c, "honest");
-	cb_bool(c, g->ward ? !honest(g, "a command") : 0);
-	say_ward(c, g);
-	return !strcmp(verb, "quit");
-}
 
 // ── The listening socket ──────────────────────────────────────────────────────
 

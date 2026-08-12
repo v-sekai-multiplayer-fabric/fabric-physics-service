@@ -45,8 +45,7 @@ typedef struct {
 } wt_stream_t;
 
 typedef struct {
-	wt_command_fn on_command;
-	void *app;
+	weft_interactor_t in;
 	int *stop;
 	wt_stream_t s[WT_MAX_STREAMS];
 } wt_session_t;
@@ -114,7 +113,7 @@ static int wt_session_callback(picoquic_cnx_t *cnx, uint8_t *bytes, size_t lengt
 			stream_release(s);
 			return 0;
 		}
-		s->reply_n = w->on_command(w->app, s->line, reply, WT_REPLY_MAX, w->stop);
+		s->reply_n = weft_ask(&w->in, s->line, reply, WT_REPLY_MAX, w->stop);
 		if (s->reply_n == 0) {
 			free(reply);
 			stream_release(s);
@@ -255,7 +254,7 @@ static void flush(wt_t *w) {
 	arm_timer(w, now);
 }
 
-void wt_readable(wt_t *w) {
+static void wt_readable(wt_t *w) {
 	uint8_t in[WT_RECV_BUF];
 	struct sockaddr_storage peer;
 	socklen_t peer_len;
@@ -273,7 +272,7 @@ void wt_readable(wt_t *w) {
 	flush(w);
 }
 
-void wt_tick(wt_t *w) {
+static void wt_tick(wt_t *w) {
 	uint64_t fired;
 	// A timerfd stays readable until it is read. The result is genuinely unwanted, and a cast
 	// to void does not silence glibc's warn_unused_result.
@@ -282,23 +281,44 @@ void wt_tick(wt_t *w) {
 	flush(w);
 }
 
-void wt_fds(wt_t *w, int *udp_fd, int *timer_fd) {
-	*udp_fd = w->udp_fd;
-	*timer_fd = w->timer_fd;
+static int fds_of(void *ctx, int *out, int max) {
+	wt_t *w = (wt_t *)ctx;
+	int n = 0;
+	if (n < max) out[n++] = w->udp_fd;
+	if (n < max) out[n++] = w->timer_fd;
+	return n;
 }
+
+// Which descriptor this is belongs here. A service that told a UDP socket from a protocol
+// timer would be a service that knew what QUIC is, and then there would be two places that do.
+static void ready(void *ctx, int fd) {
+	wt_t *w = (wt_t *)ctx;
+	if (fd == w->udp_fd)
+		wt_readable(w);
+	else if (fd == w->timer_fd)
+		wt_tick(w);
+}
+
+static void closer(void *ctx) { wt_close((wt_t *)ctx); }
+
+weft_transport_t wt_transport(wt_t *w) {
+	weft_transport_t tr = {fds_of, ready, closer, w};
+	return tr;
+}
+
+int wt_stopped(const wt_t *w) { return w->stop; }
 
 // ── Open and close ────────────────────────────────────────────────────────────
 
 wt_t *wt_open(int port, const char *bind_addr, const char *cert_file, const char *key_file,
-              wt_command_fn on_command, void *app) {
+              weft_interactor_t in) {
 	wt_t *w = calloc(1, sizeof *w);
 	if (!w) return NULL;
 	w->udp_fd = w->timer_fd = -1;
 
 	w->session = calloc(1, sizeof *w->session);
 	if (!w->session) goto fail;
-	w->session->on_command = on_command;
-	w->session->app = app;
+	w->session->in = in;
 	w->session->stop = &w->stop;
 
 	w->udp_fd = udp_bind(port, bind_addr, &w->local, &w->local_len);
