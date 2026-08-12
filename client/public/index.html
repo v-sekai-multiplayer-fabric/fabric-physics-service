@@ -1,0 +1,66 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>A Queen of the Gyre</title>
+<style>
+	body {
+		background: #14121a;
+		color: #e8e4dd;
+		font: 16px/1.5 ui-monospace, monospace;
+		margin: 0;
+		padding: 2rem;
+	}
+	main {
+		max-width: 46rem;
+		margin: 0 auto;
+	}
+	#ward {
+		color: #9a93a8;
+		padding: 0 0 1rem;
+	}
+	/* The field. `contenteditable` is Lexical's to drive; nothing here may change how the caret
+	   moves, because that is the whole reason the editor was chosen. */
+	#field {
+		background: #1d1a26;
+		border: 1px solid #38323f;
+		border-radius: 4px;
+		padding: 0.6rem 0.75rem;
+		outline: none;
+		min-height: 1.5rem;
+	}
+	#field:focus {
+		border-color: #6b5f88;
+	}
+	/* A parameter. It is one block to the caret, and it has to look like one, or a player will
+	   try to edit inside it and find they cannot. */
+	.pill {
+		display: inline-block;
+	}
+	.pill-body {
+		background: #33405c;
+		border-radius: 3px;
+		padding: 0.05rem 0.4rem;
+		white-space: nowrap;
+		user-select: none;
+	}
+	#menu {
+		border: 1px solid #38323f;
+		border-radius: 4px;
+		margin-top: 0.25rem;
+		background: #1d1a26;
+	}
+	#menu .row {
+		padding: 0.3rem 0.75rem;
+		cursor: pointer;
+	}
+	#menu .row.at {
+		background: #2f2942;
+	}
+</style>
+
+<main>
+	<div id="ward">the ward is not connected</div>
+	<div id="field" contenteditable="true" spellcheck="false" role="textbox"></div>
+	<div id="menu" hidden></div>
+</main>
+
+<script type="module" src="./bundle.js"></script>

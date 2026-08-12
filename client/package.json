@@ -1,0 +1,24 @@
+{
+  "name": "queen-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The slash command interface for a Queen of the Gyre. RFD 0112.",
+  "scripts": {
+    "build": "esbuild src/main.js --bundle --format=esm --outfile=public/bundle.js",
+    "serve": "esbuild src/main.js --bundle --format=esm --outfile=public/bundle.js --servedir=public",
+    "test": "playwright test"
+  },
+  "dependencies": {
+    "@lexical/plain-text": "0.49.0",
+    "@lexical/utils": "0.49.0",
+    "lexical": "0.49.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "esbuild": "0.28.2"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}

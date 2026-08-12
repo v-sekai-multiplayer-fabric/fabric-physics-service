@@ -1,0 +1,8 @@
+# The bundle is built, and a built artifact in the tree is a second source of truth that goes
+# stale silently. `npm run build` makes it, and the Playwright config builds it before every run
+# so a test can never pass against a stale one.
+public/bundle.js
+
+node_modules/
+test-results/
+playwright-report/
