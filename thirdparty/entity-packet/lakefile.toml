@@ -1,0 +1,15 @@
+name = "entity_packet"
+defaultTargets = ["EntityPacket"]
+[[require]]
+name = "Plausible"
+git = "https://github.com/leanprover-community/plausible"
+rev = "v4.30.0"
+[[lean_lib]]
+name = "EntityPacket"
+[[lean_exe]]
+name = "packet_demo"
+root = "Main"
+
+[[lean_exe]]
+name = "packet_emit"
+root = "Emit"
