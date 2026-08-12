@@ -2,8 +2,9 @@
 //
 //   queen play <cycles> [seed]     play a ward and print what became of it
 //   queen check <cycles> [seed]    play it twice and hold it to its invariants
+//   queen serve <port> [seed]      hold a ward open and take commands from players
 //
-// The game is the database. There is no renderer, no client and no engine: a cycle is a
+// The game is the database. There is no renderer and no engine: a cycle is a
 // transaction, the ward is a SQLite database over the store plane's VFS, and every Spark is
 // a database of their own. What you can see of the game is what you can SELECT.
 //
@@ -32,7 +33,12 @@
 #include "rng.h"
 
 #include <sqlite3.h>
+#include <arpa/inet.h>
 #include <inttypes.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -412,6 +418,34 @@ static int found_ward(gyre_t *g, const char *prefix, int nsparks, uint64_t seed,
 	return 0;
 }
 
+static int built(gyre_t *g, int venue) {
+	char sql[128];
+	snprintf(sql, sizeof sql, "SELECT built FROM venue WHERE id = %d", venue);
+	return scalar(g->ward, sql) != 0;
+}
+
+// Money turned into a place. The Queen reaches this through her planner and a player reaches
+// it by typing `/commission`, and it is one function because the accounting must not depend on
+// who asked: a venue bought by hand that skipped the ledger would break `honest()` a cycle
+// later, somewhere else, where nothing would point back here.
+static int build_venue(gyre_t *g, int i) {
+	char sql[256];
+	if (i < 0 || i >= NVENUES) return 1;
+	if (g->treasury < VENUES[i].cost) return 1;
+	if (built(g, i)) return 1;
+
+	g->treasury -= VENUES[i].cost;
+	// It leaves the ward. Somebody outside built the thing, and the scrip went with them: a
+	// venue is not a place to keep money, it is money turned into a place.
+	g->spent += VENUES[i].cost;
+	snprintf(sql, sizeof sql, "UPDATE venue SET built = %d WHERE id = %d", g->cycle, i);
+	if (run(g->ward, sql)) return 1;
+	snprintf(sql, sizeof sql,
+	         "INSERT INTO ledger(cycle, what, amount, spark) VALUES (%d, 'commission', %d, -1)",
+	         g->cycle, -VENUES[i].cost);
+	return run(g->ward, sql);
+}
+
 // ── The Queen's one decision ──────────────────────────────────────────────────
 //
 // She commissions, and then she waits. That is the whole of her agency and it is deliberate:
@@ -459,24 +493,7 @@ static int commission(gyre_t *g) {
 		return -2;
 	}
 	if (i < 0 || i >= NVENUES) return -1;
-
-	g->treasury -= VENUES[i].cost;
-	// It leaves the ward. Somebody outside built the thing, and the scrip went with
-	// them: a venue is not a place to keep money, it is money turned into a place.
-	g->spent += VENUES[i].cost;
-	snprintf(sql, sizeof sql, "UPDATE venue SET built = %d WHERE id = %d", g->cycle, i);
-	if (run(g->ward, sql)) return -1;
-	snprintf(sql, sizeof sql,
-	         "INSERT INTO ledger(cycle, what, amount, spark) VALUES (%d, 'commission', %d, -1)",
-	         g->cycle, -VENUES[i].cost);
-	if (run(g->ward, sql)) return -1;
-	return i;
-}
-
-static int built(gyre_t *g, int venue) {
-	char sql[128];
-	snprintf(sql, sizeof sql, "SELECT built FROM venue WHERE id = %d", venue);
-	return scalar(g->ward, sql) != 0;
+	return build_venue(g, i) ? -1 : i;
 }
 
 // ── The board ─────────────────────────────────────────────────────────────────
@@ -1037,9 +1054,422 @@ done:
 	return rc;
 }
 
+// ── The ward, held open ───────────────────────────────────────────────────────
+//
+// `play` and `check` found a ward, run the cycles and exit, which is what CI wants and what a
+// client cannot attach to. `serve` is the same ward with the exit taken out: it is founded
+// once, held open, and moved by commands that arrive rather than by a loop that counts.
+//
+// One process, and one only. `open_db` sets `PRAGMA locking_mode=EXCLUSIVE` and the Queen is
+// the single writer, so this is one machine with `min_machines_running = 1`. That is not a
+// deployment preference — a second writer is the failure `check_fence` exists to refuse.
+//
+// Everything below is deliberately single threaded. A command is a transaction against the
+// ward, the commands are serialised by the poll loop, and the whole game is a state machine
+// over days with nothing in the critical path to draw. A thread per client would buy nothing
+// and would put two writers where the VFS permits one.
+
+#define MAX_CLIENTS 64
+#define LINE_MAX_BYTES 512
+#define REPLY_MAX_BYTES 262144
+
+// ── What goes on the wire ─────────────────────────────────────────────────────
+//
+// CBOR, not JSON text. The reply is a batch of entity rows and scalars, and RFC 8949 packs
+// those in a fraction of the bytes while staying self-describing, which is what the control
+// path needs and what a bitpacked struct would give up. Each reply is length-prefixed, so a
+// reader frames it without scanning for a delimiter that could occur inside a venue's name.
+typedef struct {
+	unsigned char *p;
+	size_t n, cap;
+	int over; // the buffer ran out, and every write since has been dropped
+} cbor_t;
+
+static void cb_raw(cbor_t *c, unsigned char b) {
+	if (c->n >= c->cap) {
+		c->over = 1;
+		return;
+	}
+	c->p[c->n++] = b;
+}
+
+// A CBOR head is the major type in the top three bits and the argument in the low five, with
+// the argument spilling into 1, 2, 4 or 8 following bytes as it grows.
+static void cb_head(cbor_t *c, int major, uint64_t v) {
+	const unsigned char m = (unsigned char)(major << 5);
+	if (v < 24) {
+		cb_raw(c, (unsigned char)(m | v));
+	} else if (v <= 0xff) {
+		cb_raw(c, (unsigned char)(m | 24));
+		cb_raw(c, (unsigned char)v);
+	} else if (v <= 0xffff) {
+		cb_raw(c, (unsigned char)(m | 25));
+		for (int i = 1; i >= 0; i--) cb_raw(c, (unsigned char)(v >> (i * 8)));
+	} else if (v <= 0xffffffffULL) {
+		cb_raw(c, (unsigned char)(m | 26));
+		for (int i = 3; i >= 0; i--) cb_raw(c, (unsigned char)(v >> (i * 8)));
+	} else {
+		cb_raw(c, (unsigned char)(m | 27));
+		for (int i = 7; i >= 0; i--) cb_raw(c, (unsigned char)(v >> (i * 8)));
+	}
+}
+
+// A negative number is major type 1 over its own encoding, `-1 - n`. A place is int64 and
+// routinely negative — the Under-Market is thirty metres down — so this is not a spare case.
+static void cb_int(cbor_t *c, int64_t v) {
+	if (v < 0)
+		cb_head(c, 1, (uint64_t)(-(v + 1)));
+	else
+		cb_head(c, 0, (uint64_t)v);
+}
+
+static void cb_text(cbor_t *c, const char *s) {
+	const size_t n = s ? strlen(s) : 0;
+	cb_head(c, 3, n);
+	for (size_t i = 0; i < n; i++) cb_raw(c, (unsigned char)s[i]);
+}
+
+static void cb_map(cbor_t *c, uint64_t pairs) { cb_head(c, 5, pairs); }
+static void cb_array(cbor_t *c, uint64_t items) { cb_head(c, 4, items); }
+static void cb_bool(cbor_t *c, int b) { cb_raw(c, (unsigned char)(b ? 0xf5 : 0xf4)); }
+
+static void cb_kv_int(cbor_t *c, const char *k, int64_t v) {
+	cb_text(c, k);
+	cb_int(c, v);
+}
+
+// ── The ward, as a subscriber sees it ─────────────────────────────────────────
+//
+// Every row carries its `wire` and `owner`, because that is how a client matches this reply to
+// the `XRGridEntityPacket` for the same entity. Matching by position instead would be guessing,
+// and two Sparks standing on one contract would defeat it.
+
+static void say_sparks(cbor_t *c, gyre_t *g) {
+	cb_text(c, "sparks");
+	cb_array(c, (uint64_t)g->nsparks);
+	for (int i = 0; i < g->nsparks; i++) {
+		const spark_t *s = &g->sparks[i];
+		cb_map(c, 8);
+		cb_kv_int(c, "id", s->id);
+		cb_kv_int(c, "purse", s->purse);
+		cb_kv_int(c, "wear", s->wear);
+		cb_kv_int(c, "x", s->at.x);
+		cb_kv_int(c, "y", s->at.y);
+		cb_kv_int(c, "z", s->at.z);
+		cb_kv_int(c, "wire", scalar(s->db, "SELECT wire FROM spark"));
+		cb_kv_int(c, "owner", scalar(s->db, "SELECT owner FROM spark"));
+	}
+}
+
+// The venues and the board come out of the ward in one statement each, so what a client is told
+// is what the database holds rather than what this process remembers.
+static void say_rows(cbor_t *c, gyre_t *g, const char *key, const char *sql, int ncols,
+                     const char *const *cols) {
+	sqlite3_stmt *st;
+	int n = 0;
+
+	cb_text(c, key);
+	if (sqlite3_prepare_v2(g->ward, sql, -1, &st, NULL) != SQLITE_OK) {
+		cb_array(c, 0);
+		return;
+	}
+	// The count has to precede the items in a definite-length array, and the rows only arrive
+	// by stepping. Rather than a second query, write the array head as indefinite and stop it
+	// with a break: RFC 8949 keeps 0x9f/0xff for exactly this, a producer streaming a sequence
+	// whose length it does not know yet.
+	cb_raw(c, 0x9f);
+	while (sqlite3_step(st) == SQLITE_ROW) {
+		cb_map(c, (uint64_t)ncols);
+		for (int i = 0; i < ncols; i++) {
+			cb_text(c, cols[i]);
+			if (sqlite3_column_type(st, i) == SQLITE_TEXT)
+				cb_text(c, (const char *)sqlite3_column_text(st, i));
+			else if (sqlite3_column_type(st, i) == SQLITE_NULL)
+				cb_raw(c, 0xf6);
+			else
+				cb_int(c, sqlite3_column_int64(st, i));
+		}
+		n++;
+	}
+	cb_raw(c, 0xff);
+	sqlite3_finalize(st);
+	(void)n;
+}
+
+// The ward scalars. `/commission` changes a venue and the treasury together, and no interest
+// box can ever carry the second: `treasury`, `debt`, `issued`, `retired` and `spent` have no
+// place, so they ride the reliable control stream instead of a slice. This is that stream.
+static void say_ward(cbor_t *c, gyre_t *g) {
+	static const char *const VCOLS[] = {"id", "name", "cost", "built", "x", "y", "z", "wire", "owner"};
+	static const char *const BCOLS[] = {"id",   "kind", "payout", "risk", "taken",
+	                                    "outcome", "x",  "y",      "z",    "wire", "owner"};
+
+	cb_text(c, "ward");
+	cb_map(c, 8);
+	cb_kv_int(c, "cycle", g->cycle);
+	cb_kv_int(c, "treasury", g->treasury);
+	cb_kv_int(c, "debt", g->debt);
+	cb_kv_int(c, "issued", g->issued);
+	cb_kv_int(c, "retired", g->retired);
+	cb_kv_int(c, "spent", g->spent);
+	cb_kv_int(c, "sparks", g->nsparks);
+	cb_kv_int(c, "room", SPARKS_PER_WARD - g->nsparks);
+
+	say_rows(c, g, "venues",
+	         "SELECT id, name, cost, built, x, y, z, wire, owner FROM venue ORDER BY id", 9, VCOLS);
+	say_rows(c, g, "board",
+	         "SELECT id, kind, payout, risk, taken, outcome, x, y, z, wire, owner FROM board"
+	         " ORDER BY id",
+	         11, BCOLS);
+	say_sparks(c, g);
+}
+
+// ── Commands ──────────────────────────────────────────────────────────────────
+//
+// A filtered menu is a convenience and never an authorization, so the server checks on receipt
+// whatever the client chose to show. What it can check today is the game's own rules — a purse
+// the treasury cannot fill, a venue already standing, a Spark who is not here. The rebac
+// relations that decide who may run `/restart` at all are not wired to this process yet, and
+// pretending otherwise here would be the exact mistake the RFD warns about.
+static int serve_command(gyre_t *g, char *line, cbor_t *c, int *stop) {
+	char *verb = line, *arg1 = NULL, *arg2 = NULL;
+	int ok = 1;
+	const char *say = "";
+
+	while (*verb == '/' || *verb == ' ') verb++;
+	for (char *p = verb; *p; p++) {
+		if (*p != ' ') continue;
+		*p = '\0';
+		if (!arg1) arg1 = p + 1;
+		else if (!arg2) { arg2 = p + 1; break; }
+	}
+
+	if (!strcmp(verb, "look") || !*verb) {
+		// A read changes no entity, so the interest filter never runs and this reaches the
+		// caller alone. It is the one command with no reach at all.
+		say = "the ward as it stands";
+	} else if (!strcmp(verb, "cycle")) {
+		int n = arg1 ? atoi(arg1) : 1;
+		if (n < 1) n = 1;
+		if (n > 64) n = 64; // a command is not a way to run a thousand cycles inside one poll
+		for (int i = 0; i < n; i++) {
+			if (cycle(g)) { ok = 0; say = "the ward stopped mid-cycle"; break; }
+			if (honest(g, "a cycle")) { ok = 0; say = "the ward stopped being honest"; break; }
+		}
+		if (ok) say = "the ward moved";
+	} else if (!strcmp(verb, "commission")) {
+		const int v = arg1 ? atoi(arg1) : -1;
+		if (build_venue(g, v)) {
+			ok = 0;
+			say = "no such venue, or it is already built, or the treasury will not reach";
+		} else {
+			// The venue appears to every box that overlaps its place. The treasury moves with
+			// it and reaches no box at all, which is why both are in this one reply.
+			say = "commissioned";
+		}
+	} else if (!strcmp(verb, "pay")) {
+		const int who = arg1 ? atoi(arg1) : -1;
+		const int amount = arg2 ? atoi(arg2) : 0;
+		spark_t *s = NULL;
+		for (int i = 0; i < g->nsparks; i++)
+			if (g->sparks[i].id == who) s = &g->sparks[i];
+		if (!s || amount <= 0 || g->treasury < amount) {
+			ok = 0;
+			say = "no such Spark here, or an amount the treasury will not reach";
+		} else if (pay(g, s, amount, NULL, NULL)) {
+			ok = 0;
+			say = "the payment landed on neither side";
+		} else {
+			say = "paid";
+		}
+	} else if (!strcmp(verb, "restart")) {
+		// `found_ward` drops and recreates every table, so this re-founds the ward for everyone
+		// at once. No interest box excludes it, and it is the command a menu should hide from a
+		// player who may not run it.
+		const int n = g->nsparks;
+		const uint64_t seed = g->seed;
+		close_ward(g);
+		memset(g, 0, sizeof *g);
+		if (found_ward(g, "gyre-live", n, seed, 0)) {
+			*stop = 1;
+			ok = 0;
+			say = "the ward could not be founded again";
+		} else {
+			say = "the ward is founded again";
+		}
+	} else if (!strcmp(verb, "quit")) {
+		say = "goodbye";
+	} else {
+		ok = 0;
+		say = "no such command";
+	}
+
+	cb_map(c, 5);
+	cb_text(c, "ok");
+	cb_bool(c, ok);
+	cb_text(c, "say");
+	cb_text(c, say);
+	cb_text(c, "honest");
+	cb_bool(c, g->ward ? !honest(g, "a command") : 0);
+	say_ward(c, g);
+	return !strcmp(verb, "quit");
+}
+
+// ── The listening socket ──────────────────────────────────────────────────────
+
+typedef struct {
+	int fd;
+	size_t n;
+	char line[LINE_MAX_BYTES];
+} client_t;
+
+static int listen_on(int port) {
+	struct sockaddr_in6 a;
+	int fd = socket(AF_INET6, SOCK_STREAM, 0), on = 1, off = 0;
+	if (fd < 0) return -1;
+	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
+	// One socket for both families. Fly gives an app an IPv6 address and may give it no IPv4 at
+	// all, and a v6-only listener that a v4 client cannot reach is the failure that looks like a
+	// firewall. RFD 0112 records the other half of this: Chromium's resolver can fail where curl
+	// succeeds on a v6-only app, so a test navigates to the bracketed literal.
+	setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof off);
+
+	memset(&a, 0, sizeof a);
+	a.sin6_family = AF_INET6;
+	a.sin6_addr = in6addr_any;
+	a.sin6_port = htons((uint16_t)port);
+	if (bind(fd, (struct sockaddr *)&a, sizeof a) || listen(fd, 16)) {
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+// A reply, framed. Four bytes of length and then the CBOR, so a reader knows how much to wait
+// for without scanning for a delimiter that a venue's name could contain.
+static int send_reply(int fd, const unsigned char *body, size_t n) {
+	unsigned char head[4] = {(unsigned char)(n >> 24), (unsigned char)(n >> 16),
+	                         (unsigned char)(n >> 8), (unsigned char)n};
+	size_t sent = 0;
+	if (send(fd, head, 4, MSG_NOSIGNAL) != 4) return 1;
+	while (sent < n) {
+		const ssize_t w = send(fd, body + sent, n - sent, MSG_NOSIGNAL);
+		if (w <= 0) return 1;
+		sent += (size_t)w;
+	}
+	return 0;
+}
+
+static int serve(int port, int nsparks, uint64_t seed) {
+	struct pollfd fds[MAX_CLIENTS + 1];
+	client_t cl[MAX_CLIENTS];
+	unsigned char *reply = malloc(REPLY_MAX_BYTES);
+	gyre_t g;
+	int lfd, nc = 0, rc = 1, stop = 0;
+
+	if (!reply) return 1;
+	memset(&g, 0, sizeof g);
+	memset(cl, 0, sizeof cl);
+
+	if (found_ward(&g, "gyre-live", nsparks, seed, 0)) {
+		free(reply);
+		return 1;
+	}
+	if ((lfd = listen_on(port)) < 0) {
+		fprintf(stderr, "the ward has nowhere to listen on port %d\n", port);
+		close_ward(&g);
+		free(reply);
+		return 1;
+	}
+	printf("the ward is open on port %d, with %d Sparks and seed %llu\n", port, nsparks,
+	       (unsigned long long)seed);
+	fflush(stdout);
+
+	while (!stop) {
+		fds[0].fd = lfd;
+		fds[0].events = POLLIN;
+		for (int i = 0; i < nc; i++) {
+			fds[i + 1].fd = cl[i].fd;
+			fds[i + 1].events = POLLIN;
+		}
+		// No timeout. A ward with nobody typing burns nothing, and a background tab holds its
+		// seat by keepalive rather than by traffic — the browser throttles a hidden tab and the
+		// client stops asking for slices, so silence on a socket is the ordinary case and never
+		// a reason to drop the subscriber.
+		if (poll(fds, (nfds_t)(nc + 1), -1) < 0) break;
+
+		if (fds[0].revents & POLLIN) {
+			const int c = accept(lfd, NULL, NULL);
+			if (c >= 0) {
+				if (nc < MAX_CLIENTS) {
+					cl[nc].fd = c;
+					cl[nc].n = 0;
+					nc++;
+				} else {
+					close(c); // the seats are full, and a silent queue would be worse
+				}
+			}
+		}
+
+		for (int i = 0; i < nc;) {
+			int gone = 0;
+			if (!(fds[i + 1].revents & (POLLIN | POLLHUP | POLLERR))) {
+				i++;
+				continue;
+			}
+			char buf[256];
+			const ssize_t r = recv(cl[i].fd, buf, sizeof buf, 0);
+			if (r <= 0) {
+				gone = 1;
+			} else {
+				for (ssize_t k = 0; k < r && !gone; k++) {
+					if (buf[k] == '\r') continue;
+					if (buf[k] != '\n') {
+						// A line longer than the buffer is dropped rather than truncated. A
+						// truncated command is a different command, and running one nobody typed
+						// is worse than answering none.
+						if (cl[i].n + 1 < sizeof cl[i].line) cl[i].line[cl[i].n++] = buf[k];
+						continue;
+					}
+					cl[i].line[cl[i].n] = '\0';
+					cl[i].n = 0;
+
+					cbor_t c = {reply, 0, REPLY_MAX_BYTES, 0};
+					const int bye = serve_command(&g, cl[i].line, &c, &stop);
+					if (c.over) {
+						// A ward too big to describe in one reply is a real limit and it is
+						// reported, not silently cut: a truncated batch decodes as a short one
+						// and the client cannot tell the difference.
+						fprintf(stderr, "the ward does not fit in %d bytes\n", REPLY_MAX_BYTES);
+						gone = 1;
+					} else if (send_reply(cl[i].fd, reply, c.n) || bye) {
+						gone = 1;
+					}
+				}
+			}
+			if (gone) {
+				close(cl[i].fd);
+				cl[i] = cl[nc - 1];
+				fds[i + 1].revents = 0;
+				nc--;
+			} else {
+				i++;
+			}
+		}
+	}
+
+	for (int i = 0; i < nc; i++) close(cl[i].fd);
+	close(lfd);
+	rc = honest(&g, "the end");
+	close_ward(&g);
+	free(reply);
+	return rc;
+}
+
 int main(int argc, char **argv) {
 	if (argc < 3) {
-		fprintf(stderr, "usage: queen play|check|shard <cycles> [seed] [sparks]\n");
+		fprintf(stderr, "usage: queen play|check|shard <cycles> [seed] [sparks]\n"
+		                "       queen serve <port> [seed] [sparks]\n");
 		return 2;
 	}
 	const char *mode = argv[1];
@@ -1066,6 +1496,10 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 	weft_vfs_register(1);
+
+	// `serve` takes a port where the others take a count of cycles, because it runs until it is
+	// stopped rather than for a number of days.
+	if (strcmp(mode, "serve") == 0) return serve(cycles, nsparks, seed);
 
 	if (strcmp(mode, "shard") == 0) return shard(cycles, nsparks, seed);
 
