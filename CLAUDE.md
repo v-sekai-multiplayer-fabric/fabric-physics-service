@@ -1,7 +1,15 @@
-# fabric-store-domain
+# fabric-physics-service
 
-This repository holds two planes. `queen` is a settlement game. The store plane is SQLite on a
-VFS that keeps its pages in FoundationDB. The two planes link into one process.
+This repository is a server-authoritative networked physics service for one ward. It starts as
+a clone of `fabric-store-domain` and still holds that repository's two planes: `queen`, a
+settlement game, and the store plane, SQLite on a VFS that keeps its pages in FoundationDB. The
+two planes link into one process.
+
+The clone is the point rather than a shortcut. The physics service needs a zone with a durable
+ward, a 20 Hz publish, a fanout that slices, and a CI that runs against a live FoundationDB, and
+all four exist here and run. What it does not have yet is the physics: authority over a moving
+body, and the priority accumulator that decides which bodies a subscriber hears about. Those go
+on top of the ward, not beside it.
 
 `README.md` gives the design. The comments in `src/queen.c` give the reasons. Record decisions
 in the `multiplayer-fabric-manuals` repository.
@@ -60,7 +68,13 @@ code.
 | `MAX_WARDS`        | 8     | `src/queen.c`                  | Wards in one `shard` run              |
 | `TXN_MAX_PARTS`    | 16    | `thirdparty/store-plane/fdb_vfs.c` | Databases in one group commit     |
 | `WARD_TICK_HZ`     | 20    | `src/queen.c`                  | Publish rate, in real time            |
+| `WARD_REPLY_MAX`   | 262144 | `src/interactor.h`            | Bytes in one interactor reply         |
 | `PAGE`             | 4096  | `thirdparty/store-plane/fdb_vfs.c` | SQLite page size                  |
+
+`WARD_REPLY_MAX` bounds `WARD_ENTITIES`. An `XRGridEntityPacket` is 100 bytes, so one reply
+holds 2621 entities and a ward of 1800 is one whole snapshot with room over — no chunking and
+no second transport. Past 2621 the answer is a chunked reply and not a larger buffer, because
+`ward_ask` already refuses to cut a batch a reader cannot tell from a complete one.
 
 A ward MUST NOT hold more Sparks than `SPARKS_PER_WARD`. The code refuses a larger ward. The
 refusal is a feature. Past that limit, add a second ward.
