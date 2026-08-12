@@ -17,7 +17,16 @@
 #include <sqlite3.h>
 #include <stdint.h>
 
-#define MAX_SPARKS 64
+// A ward is a zone. `AbyssalSLA.lean` sizes one at `entitiesPerZone`, and
+// `AuthorityInterest.lean` reserves `InterestCapacity` of it for ghosts a neighbour
+// replicates in — those are not this ward's to spend, so a Spark comes out of the rest.
+#define WARD_ENTITIES 1800
+#define WARD_HEADROOM 400
+#define WARD_AUTHORITY (WARD_ENTITIES - WARD_HEADROOM)
+
+// The array bound. `SPARKS_PER_WARD` is narrower and `queen.c` owns it, because the venue
+// table it subtracts is that file's; `join_ward` refuses at both.
+#define MAX_SPARKS WARD_AUTHORITY
 
 typedef struct {
 	sqlite3 *db;
