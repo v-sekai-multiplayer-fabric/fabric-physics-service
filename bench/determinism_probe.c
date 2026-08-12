@@ -83,13 +83,19 @@ int main(int argc, char **argv) {
 	// players build towers, and a tower is a coupled chain of contacts rather than one contact
 	// with the floor. The hard case is the one worth asking determinism about.
 	int stack = 0;
+	// Zero leaves MuJoCo's defaults (100 and 50). Above zero is a deadline on the solver.
+	int iters = 0, ls_iters = 0;
 	double sim_hz = 60.0, publish_hz = 20.0;
 	const char *emit_path = NULL, *compare_path = NULL;
+	int print_scene = 0;
 
 	for (int i = 1; i < argc; i++) {
+		if (!strcmp(argv[i], "--print-scene")) { print_scene = 1; continue; }
 		if (i + 1 >= argc) { fprintf(stderr, "%s wants a value\n", argv[i]); return 2; }
 		else if (!strcmp(argv[i], "--cubes")) cubes = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--stack")) stack = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--solver-iters")) iters = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--ls-iters")) ls_iters = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--players")) players = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--ticks")) ticks = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--sim-hz")) sim_hz = atof(argv[++i]);
@@ -109,10 +115,19 @@ int main(int argc, char **argv) {
 	// Two worlds from one scene string. Same text, so any difference is the simulation's and not
 	// the generator's — building the MJCF twice would also test the generator, which is a
 	// separate question and would muddy this one.
-	char *scene = gaffer_scene(players, cubes, stack, timestep);
+	char *scene = gaffer_scene(players, cubes, stack, iters, ls_iters, timestep);
 	if (!scene) {
 		fprintf(stderr, "cannot build a scene of %d players and %d cubes\n", players, cubes);
 		return 1;
+	}
+
+	// The scene is generated, so the only way to see what is being simulated is to ask for it.
+	// The output is valid MJCF: save it and MuJoCo's own viewer opens it.
+	if (print_scene) {
+		fputs(scene, stdout);
+		fputc('\n', stdout);
+		free(scene);
+		return 0;
 	}
 
 	mj_physics_t a, b;
@@ -216,7 +231,7 @@ int main(int argc, char **argv) {
 		// run to have kept every one of them in memory.
 		mj_physics_close(&a);
 		mj_physics_close(&b);
-		char *again = gaffer_scene(players, cubes, stack, timestep);
+		char *again = gaffer_scene(players, cubes, stack, iters, ls_iters, timestep);
 		mj_physics_init(&a, again, err, sizeof err);
 		free(again);
 		memcpy(home_a, a.data->mocap_pos, (size_t)a.model->nmocap * 3 * sizeof(double));

@@ -27,6 +27,19 @@
 // touches the floor and nothing else, while a tower of fifty is fifty contacts in a chain that
 // the solver has to keep upright every step. Measuring only the field understates the simulate
 // stage and flatters determinism, because the easy case is also the reproducible one.
-char *gaffer_scene(int players, int cubes, int stack, double timestep);
+// `iters` and `ls_iters` cap the solver: the maximum main iterations and linesearch iterations
+// MuJoCo may spend on one step. Zero leaves MuJoCo's defaults, which are 100 and 50.
+//
+// This is the knob a real-time zone actually needs, and it is a deadline rather than a quality
+// setting. An unbounded solver converges as far as the problem demands, so a collapsing tower
+// costs whatever it costs — measured here at 1840 ms in a 50 ms tick. A capped solver returns a
+// less-converged answer in bounded time, which is the trade a zone wants: physics that is
+// slightly wrong beats physics that arrives after the snapshot went out.
+//
+// Capping does not cost determinism. Fewer iterations is still the same arithmetic in the same
+// order, so a capped run replays exactly like an uncapped one — but the cap becomes part of the
+// wire contract, like the simulation rate. Two peers solving to different iteration counts are
+// in different worlds, and they diverge in the tick where the cap first bites.
+char *gaffer_scene(int players, int cubes, int stack, int iters, int ls_iters, double timestep);
 
 #endif

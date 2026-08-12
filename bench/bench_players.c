@@ -223,8 +223,9 @@ typedef struct {
 	int ok;
 } result_t;
 
-static int run_at(int players, int cubes, int stack, int per_player, double sim_hz,
-                  double publish_hz, int ticks, double interest_m, result_t *out) {
+static int run_at(int players, int cubes, int stack, int iters, int ls_iters, int per_player,
+                  double sim_hz, double publish_hz, int ticks, double interest_m,
+                  result_t *out) {
 	mj_physics_t phys;
 	char error[1024] = {0};
 	char *scene;
@@ -248,7 +249,7 @@ static int run_at(int players, int cubes, int stack, int per_player, double sim_
 	r.interest_um = (int64_t)llround(interest_m * 1000000.0);
 	out->entities = r.entities;
 
-	scene = gaffer_scene(players, cubes, stack, timestep);
+	scene = gaffer_scene(players, cubes, stack, iters, ls_iters, timestep);
 	if (!scene) {
 		fprintf(stderr, "cannot build a scene of %d players and %d cubes\n", players, cubes);
 		return 0;
@@ -393,6 +394,8 @@ int main(int argc, char **argv) {
 	// Timing only the field understates the simulate stage for every topology at once, which is
 	// worse than understating one — it makes the comparison look fair while all are flattered.
 	int stack = 0;
+	// Zero leaves MuJoCo's defaults (100 and 50). Above zero is a deadline on the solver.
+	int iters = 0, ls_iters = 0;
 	const char *logbook = NULL;
 	double sim_hz = 60.0, publish_hz = 20.0;
 	// How far a subscriber cares, in metres. Room scale plus reach: the article's players are
@@ -412,6 +415,8 @@ int main(int argc, char **argv) {
 		else if (!strcmp(argv[i], "--players")) players = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--cubes")) cubes = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--stack")) stack = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--solver-iters")) iters = atoi(argv[++i]);
+		else if (!strcmp(argv[i], "--ls-iters")) ls_iters = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--ticks")) ticks = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--core")) core = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--sim-hz")) sim_hz = atof(argv[++i]);
@@ -441,7 +446,8 @@ int main(int argc, char **argv) {
 
 	if (!ramp) {
 		if (players == 0) players = room;
-		if (!run_at(players, cubes, stack, per_player, sim_hz, publish_hz, ticks, interest_m, &r))
+		if (!run_at(players, cubes, stack, iters, ls_iters, per_player, sim_hz, publish_hz, ticks,
+		            interest_m, &r))
 			return 1;
 		report(players, cubes, per_player, &r, budget_ms, publish_hz);
 		if (logbook)
@@ -461,7 +467,8 @@ int main(int argc, char **argv) {
 
 		memset(&last, 0, sizeof last);
 		for (int n = 1; n <= room; n++) {
-			if (!run_at(n, cubes, stack, per_player, sim_hz, publish_hz, ticks, interest_m, &r))
+			if (!run_at(n, cubes, stack, iters, ls_iters, per_player, sim_hz, publish_hz, ticks,
+			                interest_m, &r))
 				return 1;
 			printf("  %3d players  %6.2f ms median  %6.2f worst  (sim %5.2f enc %5.2f sli %5.2f)"
 			       "  contacts %d\n",
