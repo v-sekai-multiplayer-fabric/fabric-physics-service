@@ -114,11 +114,16 @@ static inline uint32_t class_owner(int cls, int ward) {
 
 // Where a Spark stands when it has no contract. Spread across the Commons by id, with two
 // coprime strides so consecutive ids do not land together.
+//
+// The moduli are coprime, so the pair repeats every 103 * 109 and not every 51. Both axes were
+// 51 when a ward held 48 Sparks and one lattice period covered the ward exactly; at 1384 that
+// same period put twenty-seven Sparks on each other's heads, and an entity the broadphase
+// cannot separate from twenty-six others has a position in name only.
 static inline place_t spark_home(int id) {
 	place_t p;
-	p.x = UM((id * 37) % 51 - 25);
+	p.x = UM((id * 37) % 103 - 51);
 	p.y = COMMONS_UM;
-	p.z = UM((id * 23) % 51 - 25);
+	p.z = UM((id * 23) % 109 - 54);
 	return p;
 }
 
@@ -129,6 +134,25 @@ static inline place_t contract_place(int id) {
 	p.x = UM((id * 61) % 101 - 50);
 	p.y = (id % 2) ? UNDER_UM : COMMONS_UM;
 	p.z = UM((id * 47) % 101 - 50);
+	return p;
+}
+
+// Where a thing stands when it does not stand anywhere. The Queen is the ward's authority and
+// is in no room in it, but the broadphase indexes what it is given and an entity with no
+// position is an entity it cannot hold — so the non-physical ones take a place here instead of
+// taking none.
+//
+// The band is a plane below the Under-Market rather than a distant one. `hilbert_cell_of`
+// normalizes each axis against the scene extent, so a marker parked a kilometre up would spend
+// ten bits of Y resolution on empty air; thirty metres down costs one bit and no player's ghost
+// AABB reaches it.
+#define NONPHYSICAL_UM UM(-60)
+
+static inline place_t nonphysical_place(uint32_t local) {
+	place_t p;
+	p.x = UM((int64_t)((local * 37u) % 103u) - 51);
+	p.y = NONPHYSICAL_UM;
+	p.z = UM((int64_t)((local * 23u) % 109u) - 54);
 	return p;
 }
 
