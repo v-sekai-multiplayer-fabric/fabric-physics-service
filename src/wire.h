@@ -62,8 +62,13 @@ typedef struct {
 
 #define WIRE_QUEEN 0u
 #define WIRE_VENUE_BASE 1u         // + the venue's index; there are six
-#define WIRE_SPARK_BASE 0x100u     // + the Spark's id, which is unique across the whole game
-#define WIRE_CONTRACT_BASE 0x1000u // + the board row, which starts again each cycle
+#define WIRE_SPARK_BASE 0x100u // + the Spark's id, which is unique across the whole game
+
+// A Spark id counts across the whole game rather than within a ward, so the Spark range holds
+// `MAX_WARDS` wards of `SPARKS_PER_WARD`. At a zone of 1800 that is eleven thousand names
+// against the three thousand 0x1000 left — a bound a 48-Spark ward could never reach.
+// `queen.c` asserts the fit, where both numbers are in scope.
+#define WIRE_CONTRACT_BASE 0x4000u // + the board row, which starts again each cycle
 
 enum { CLASS_SPARK = 1, CLASS_VENUE = 2, CLASS_CONTRACT = 3, CLASS_QUEEN = 4 };
 
