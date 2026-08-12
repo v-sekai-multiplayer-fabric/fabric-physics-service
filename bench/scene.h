@@ -11,11 +11,35 @@
 // budget on articulation nothing here has asked for, and the budget is the scarce thing.
 #define AVATAR_ENTITIES 3
 
+// How tall a cube is, in metres. The geom is a box of half-extent 0.2, so a tower of fifty is
+// twenty metres — which is the article's own "huge stacks of cubes, up to 20 or 30 meters high".
+#define CUBE_METRES 0.4
+
 // An MJCF scene of `cubes` simulated boxes and `players` avatars, on a floor. The caller frees
 // it, and gets NULL if the arguments do not make a scene.
 //
 // Entities are `cubes + players * AVATAR_ENTITIES`, in that order: the cubes are the world and
 // the avatars are the people in it, which is also the order `bench_players` encodes them.
-char *gaffer_scene(int players, int cubes, double timestep);
+//
+// `stack` is how many cubes high to pile them. Zero is a flat field, one cube deep, which is
+// what a zone looks like before anybody has played in it. Anything more builds towers, which is
+// what the article's players actually make and a much harder contact problem: a settled grid
+// touches the floor and nothing else, while a tower of fifty is fifty contacts in a chain that
+// the solver has to keep upright every step. Measuring only the field understates the simulate
+// stage and flatters determinism, because the easy case is also the reproducible one.
+// `iters` and `ls_iters` cap the solver: the maximum main iterations and linesearch iterations
+// MuJoCo may spend on one step. Zero leaves MuJoCo's defaults, which are 100 and 50.
+//
+// This is the knob a real-time zone actually needs, and it is a deadline rather than a quality
+// setting. An unbounded solver converges as far as the problem demands, so a collapsing tower
+// costs whatever it costs — measured here at 1840 ms in a 50 ms tick. A capped solver returns a
+// less-converged answer in bounded time, which is the trade a zone wants: physics that is
+// slightly wrong beats physics that arrives after the snapshot went out.
+//
+// Capping does not cost determinism. Fewer iterations is still the same arithmetic in the same
+// order, so a capped run replays exactly like an uncapped one — but the cap becomes part of the
+// wire contract, like the simulation rate. Two peers solving to different iteration counts are
+// in different worlds, and they diverge in the tick where the cap first bites.
+char *gaffer_scene(int players, int cubes, int stack, int iters, int ls_iters, double timestep);
 
 #endif

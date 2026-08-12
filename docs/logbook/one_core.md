@@ -29,11 +29,11 @@ article.
 
 Three shapes, sixty ticks each.
 
-| players | cubes | entities | median | of budget | simulate | encode | fanout |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 4 | 900 | 912 | 21.12 ms | 42% | 20.83 | 0.04 | 0.01 |
-| 166 | 900 | 1398 | 20.53 ms | 41% | 19.59 | 0.06 | 0.45 |
-| 466 | 0 | 1398 | 3.98 ms | 8% | 1.04 | 0.04 | 3.02 |
+| players | cubes | entities |   median | of budget | simulate | encode | fanout |
+| ------: | ----: | -------: | -------: | --------: | -------: | -----: | -----: |
+|       4 |   900 |      912 | 21.12 ms |       42% |    20.83 |   0.04 |   0.01 |
+|     166 |   900 |     1398 | 20.53 ms |       41% |    19.59 |   0.06 |   0.45 |
+|     466 |     0 |     1398 |  3.98 ms |        8% |     1.04 |   0.04 |   3.02 |
 
 Run to run the cubed medians move by about 2 ms and the worst tick by much more — 58 ms in one
 of the four-player runs, which is over budget on its own. That spread is a desktop with a
@@ -85,14 +85,62 @@ with 92% of its tick free is not the constraint, and adding cores will not help 
 - Contacts were 3600 in every cubed run, which is the field at rest. A session where players
   are actually throwing things has a moving contact count this scene does not produce.
 
+## 2026-08-12: the simulation replays, so lockstep is not ruled out
+
+Not a timing entry. Deterministic lockstep sends intent and nothing else, and every peer arrives
+at the same world by simulating it — which only works if the same inputs give the same state bit
+for bit. That is a property, not a number, and it gates a whole topology, so it was asked before
+anything was built on the answer.
+
+`bench/determinism_probe.c`, two worlds from one MJCF string, driven by an input that is a pure
+function of the tick, compared with `mj_getState(..., mjSTATE_INTEGRATION)` every tick.
+
+| shape                                      | entities | ticks | result       |
+| ------------------------------------------ | -------: | ----: | ------------ |
+| 900 cubes, 4 players, one process          |      912 |  1200 | identical    |
+| 900 cubes, 4 players, **two processes**    |      912 |  1200 | traces agree |
+| 900 cubes, 166 players, a full ward        |     1398 |   600 | identical    |
+| 466 players, no cubes — no contacts at all |     1398 |   600 | identical    |
+| 1400 cubes, no players — maximum contacts  |     1400 |   600 | identical    |
+
+The state is 28063 `mjtNum` at 912 entities, 224504 bytes, and every byte matched.
+
+**So topology 1 stays on the table.** That is the whole finding, and it is worth what it cost:
+the alternative was building an intent-driven lockstep harness and discovering the answer
+afterwards.
+
+### `sim-hz` is a wire constant, not a tuning knob
+
+The one run that differed is the one that should. The same scene at 120/20 Hz instead of 60/20
+diverges from the 60/20 trace **at tick 0** — a different substep split is a different
+simulation, not a worse one.
+
+That makes the simulation rate part of the wire contract for any lockstep zone: two peers that
+disagree about it do not drift apart slowly, they are in different worlds from the first tick.
+It belongs pinned beside `WARD_TICK_HZ`, and a peer that cannot hit it must not be allowed to
+run at a rate it can hit.
+
+### What this does not say
+
+- **Same binary, one machine.** This is the floor, not the question. MuJoCo promises nothing
+  across platforms, `mjtNum` is a double whose rounding follows the compiler and its flags, and
+  a shipped lockstep needs this answered on Linux and on the headset. `--emit` and `--compare`
+  are for exactly that: run it on two machines and diff the traces.
+- Sixty seconds of simulated time at most. A divergence that takes ten minutes to appear would
+  not have been seen.
+- No threading. MuJoCo is stepped on one thread here; `mj_step` with a thread pool reassociates
+  floating-point work and is a separate question.
+- Reproducible is not the same as _agreeing with another implementation_. Nothing here says a
+  second physics engine, or a headset build with different flags, computes the same world.
+
 ## Every run, as it was logged
 
 `bench_players --log docs/logbook/one_core.md` appends here. The rows below are the raw
 conditions and outcomes; the sections above are what they mean. Rows are never edited or
 removed — a measurement that turned out to be wrong gets a section saying so.
 
-| when | run | players | cubes | per player | entities | sim Hz | pub Hz | interest m | ticks | median ms | worst ms | simulate | encode | fanout | contacts | sent | bytes |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 2026-08-12 07:09 | fixed | 4 | 900 | 3 | 912 | 60 | 20 | 10.0 | 60 | 21.12 | 58.47 | 20.83 | 0.04 | 0.01 | 3600 | 256 | 25600 |
-| 2026-08-12 07:09 | fixed | 166 | 900 | 3 | 1398 | 60 | 20 | 10.0 | 60 | 20.53 | 26.96 | 19.59 | 0.06 | 0.45 | 3600 | 10624 | 1062400 |
-| 2026-08-12 07:09 | fixed | 466 | 0 | 3 | 1398 | 60 | 20 | 10.0 | 60 | 3.98 | 5.63 | 1.04 | 0.04 | 3.02 | 0 | 29780 | 2978000 |
+| when             | run   | players | cubes | per player | entities | sim Hz | pub Hz | interest m | ticks | median ms | worst ms | simulate | encode | fanout | contacts |  sent |   bytes |
+| ---------------- | ----- | ------: | ----: | ---------: | -------: | -----: | -----: | ---------: | ----: | --------: | -------: | -------: | -----: | -----: | -------: | ----: | ------: |
+| 2026-08-12 07:09 | fixed |       4 |   900 |          3 |      912 |     60 |     20 |       10.0 |    60 |     21.12 |    58.47 |    20.83 |   0.04 |   0.01 |     3600 |   256 |   25600 |
+| 2026-08-12 07:09 | fixed |     166 |   900 |          3 |     1398 |     60 |     20 |       10.0 |    60 |     20.53 |    26.96 |    19.59 |   0.06 |   0.45 |     3600 | 10624 | 1062400 |
+| 2026-08-12 07:09 | fixed |     466 |     0 |          3 |     1398 |     60 |     20 |       10.0 |    60 |      3.98 |     5.63 |     1.04 |   0.04 |   3.02 |        0 | 29780 | 2978000 |

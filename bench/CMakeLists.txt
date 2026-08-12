@@ -47,10 +47,31 @@ add_library(fanout_edge STATIC
 target_include_directories(fanout_edge PUBLIC
   ${WEFT_GEN_DIR} ${PHYSICS_ROOT}/thirdparty/fanout-edge/src ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Does the simulation replay identically? The question deterministic lockstep rests on, asked
+# before anything is built on the answer. It links the scene and the physics and nothing else —
+# no packet, no fan-out, no interest — because a probe that carried the wire would be asking
+# whether the wire is deterministic, which is a different and much easier question.
+add_executable(determinism_probe determinism_probe.c scene.c)
+target_include_directories(determinism_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(determinism_probe PRIVATE mj_physics)
+# `fopen` and `sscanf` are standard C and MSVC's deprecation of them is not. The `_s` variants
+# do not exist elsewhere, so taking the warning at its word would make this file Windows-only
+# to silence a warning about portability.
+if(MSVC)
+  target_compile_definitions(determinism_probe PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+
+# Both of these open the logbook or a trace with `fopen`, which is standard C that MSVC
+# deprecates in favour of `_s` variants that exist nowhere else. Taking the warning at its word
+# would make these files Windows-only in order to silence a warning about portability.
+
 add_executable(bench_players bench_players.c scene.c)
 target_include_directories(bench_players PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR} ${PHYSICS_ROOT}/src)
 target_link_libraries(bench_players PRIVATE mj_physics fanout_edge)
+if(MSVC)
+  target_compile_definitions(bench_players PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
 
 # The one MuJoCo test `mujoco-riscv64` carried, which its own README says was never built or run.
 # Building the engine here is what makes running it free, and a test that has never run is not a
@@ -65,18 +86,19 @@ add_test(NAME mj_freefall COMMAND mj_freefall)
 if(NOT WIN32)
   target_link_libraries(bench_players PRIVATE m)
   target_link_libraries(mj_freefall PRIVATE m)
+  target_link_libraries(determinism_probe PRIVATE m)
 endif()
 
 # MuJoCo builds as a shared library, and Windows looks for a DLL beside the executable rather
 # than along a build-tree path. Without this the tests fail with 0xc0000135 — "the dependency
 # was not found" — which reads like a broken binary and is a missing copy.
-foreach(t bench_players mj_freefall)
+foreach(t bench_players mj_freefall determinism_probe)
   add_custom_command(TARGET ${t} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy -t $<TARGET_FILE_DIR:${t}> $<TARGET_RUNTIME_DLLS:${t}>
     COMMAND_EXPAND_LISTS)
 endforeach()
 
-foreach(t bench_players mj_freefall fanout_edge)
+foreach(t bench_players mj_freefall fanout_edge determinism_probe)
   # Target-scoped, never global: a global `-Wextra` is what made MuJoCo's own warnings fatal the
   # last time this was built, which the subtree's cmake comment records.
   if(MSVC)
