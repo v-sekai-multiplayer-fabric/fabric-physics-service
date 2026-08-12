@@ -85,13 +85,14 @@ jobs:
           echo "$out" | grep -q "arrived" || {
             echo "the Broadcast Row brought nobody"; exit 1; }
 
-      # A game too large for one subscriber's slice. Sixty Sparks is two wards, and the run
-      # moves a Spark between them halfway through. The sum has to hold across both wards,
-      # which is the part a migration is able to break, and did on the first attempt.
+      # A game too large for one zone. A ward holds 1384 Sparks, so 1500 is two wards, and the
+      # run moves a Spark between them halfway through. The sum has to hold across both wards,
+      # which is the part a migration is able to break, and did on the first attempt. A Spark
+      # is a database, so this founds fifteen hundred of them and takes about a minute.
       - name: A game of two wards, and a Spark that moves between them
         run: |
           set +e
-          out=$(./build/queen shard 40 31337 60 2>&1); rc=$?
+          out=$(./build/queen shard 40 31337 1500 2>&1); rc=$?
           set -e
           echo "$out"
           [ "$rc" -eq 0 ] || { echo "the shard run exited $rc"; exit 1; }
@@ -102,12 +103,12 @@ jobs:
           echo "$out" | grep -q "no two share a name" || {
             echo "two wards gave out the same wire id, or nobody checked"; exit 1; }
 
-      # One ward may not exceed the slice budget by itself. The refusal is the feature: a
-      # ward that quietly exceeded it would drop its venues out of every slice.
-      - name: One ward refuses to exceed a slice
+      # One ward may not exceed its zone by itself. The refusal is the feature: past it the
+      # answer is a second ward, not a fuller one.
+      - name: One ward refuses to exceed a zone
         run: |
-          if ./build/queen play 5 1 60 2>/dev/null; then
-            echo "a 60-Spark ward was allowed, and its venues would fall out of every slice"
+          if ./build/queen play 5 1 1500 2>/dev/null; then
+            echo "a 1500-Spark ward was allowed, and a zone holds 1384"
             exit 1
           fi
           echo "refused, as it should"
