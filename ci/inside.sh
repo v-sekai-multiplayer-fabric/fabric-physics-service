@@ -9,7 +9,7 @@ step() { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
 step "Toolchain"
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends \
-  ca-certificates curl cmake g++ make libsqlite3-dev >/dev/null
+  ca-certificates curl cmake g++ make libsqlite3-dev libssl-dev >/dev/null
 
 step "FoundationDB ${FDB_VERSION} (cached in ~/fdb-debs on the host)"
 base="https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}"

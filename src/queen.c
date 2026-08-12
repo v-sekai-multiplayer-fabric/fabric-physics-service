@@ -84,6 +84,28 @@ int weft_txn_abort(unsigned long long txnid);
 #define FIXED_ENTITIES (NVENUES + 1 + BOARD_SIZE + 3)
 #define SPARKS_PER_WARD (SLICE_ENTITIES - FIXED_ENTITIES)
 
+// ── The clock ─────────────────────────────────────────────────────────────────
+//
+// The ward keeps the fabric's clock, in the fabric's units. `PBVH_SIM_TICK_HZ` is 20 in
+// `predictive_bvh.h`, the crowd plane publishes at 20, and the zone tick was written against the
+// same number, so a ward that invented a rate of its own would be the one thing in the stack
+// that had to be converted before it could be compared.
+//
+// A tick is an integer, and so is everything measured in them. `zf_zonetick_run` takes a
+// `tick_count` rather than a float `dt` for the same reason the wire does: a velocity is a
+// per-tick displacement, and a fractional tick has nothing to multiply.
+//
+// This clock is real time and it is the only one here that is. It says how often the ward
+// publishes what it holds, and nothing else.
+//
+// A cycle is not made of ticks. A day in the Gyre passes when the Queen's cycle runs, which is
+// game time, and the two must not be related: deriving one from the other would tie the rate the
+// debt compounds at to the rate the network publishes at, so a ward on a busy machine would owe
+// less by the end. It would also cost the replay check, because `check` plays one seed twice and
+// compares a fingerprint — and a cycle that advanced on wall-clock time replays differently on a
+// slower machine, which turns the invariant into an anecdote about how fast the run went.
+#define WARD_TICK_HZ 20
+
 // How often somebody hears the Broadcast Row and comes. Slow enough that the Row is a long
 // investment rather than a switch, and on the cycle count rather than the RNG, so an arrival
 // is in the same place on a replay.

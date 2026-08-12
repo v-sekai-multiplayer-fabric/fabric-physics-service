@@ -20,6 +20,12 @@ find_library(FDB_LIBRARY NAMES fdb_c REQUIRED)
 find_path(SQLITE_INCLUDE_DIR sqlite3.h REQUIRED)
 find_library(SQLITE_LIBRARY NAMES sqlite3 REQUIRED)
 
+# The QUIC the ward will speak, vendored with the gateway edge. Built on its own here, before
+# anything links it: whether picoquic compiles in this repository at all is the question that
+# decides the shape of the transport work, and it is cheaper to answer it now than after four
+# hundred lines are written against it.
+include(cmake/picoquic.cmake)
+
 add_library(weft_fdb_vfs STATIC thirdparty/store-plane/fdb_vfs.c)
 target_include_directories(weft_fdb_vfs PUBLIC
   ${FDB_INCLUDE_DIR}/foundationdb ${SQLITE_INCLUDE_DIR} thirdparty/store-plane)
