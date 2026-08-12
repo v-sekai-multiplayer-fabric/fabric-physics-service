@@ -1,0 +1,6 @@
+-- SPDX-License-Identifier: MIT
+-- AabbSource — DRIVING (primary) port: entity AABB + velocity/accel pushed in.
+-- The core reads world state through this; adapters (fixture replay, live ECS) implement it.
+--
+-- Port contract stub: define the narrow interface the core depends on and an
+-- adapter implements. Kept at the lowest common denominator across bindings.
