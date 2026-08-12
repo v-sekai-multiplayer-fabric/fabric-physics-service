@@ -12,15 +12,12 @@
 #define QUEEN_WARD_H
 
 #include "rng.h"
+#include "wire.h"
 
 #include <sqlite3.h>
 #include <stdint.h>
 
 #define MAX_SPARKS 64
-
-typedef struct {
-	int64_t x, y, z;
-} place_t;
 
 typedef struct {
 	sqlite3 *db;
