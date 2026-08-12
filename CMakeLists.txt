@@ -47,3 +47,12 @@ target_include_directories(queen PRIVATE src thirdparty/taskweft)
 target_link_libraries(queen PRIVATE weft_fdb_vfs picoquic_vendored weft::interactor)
 target_compile_options(queen PRIVATE -Wall -Wextra)
 set_target_properties(queen PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+
+# Off by default, because it fetches. `test/` holds unit tests over the arithmetic in
+# `src/wire.h` and `src/rng.h` and nothing else — the game is tested by playing it, in
+# `ci/inside.sh`, against a real cluster. See `test/CMakeLists.txt`.
+option(QUEEN_TESTS "Build the unit tests" OFF)
+if(QUEEN_TESTS)
+  enable_testing()
+  add_subdirectory(test)
+endif()
