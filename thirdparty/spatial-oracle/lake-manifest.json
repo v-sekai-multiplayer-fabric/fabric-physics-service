@@ -35,7 +35,7 @@
    "type": "git",
    "subDir": null,
    "scope": "",
-   "rev": "437222d1a2122fea700afedaf90380720fb73fd2",
+   "rev": "fed36fdd69862e734394a559d81a24b4e825061a",
    "name": "«lean-shared-core»",
    "manifestFile": "lake-manifest.json",
    "inputRev": "main",
