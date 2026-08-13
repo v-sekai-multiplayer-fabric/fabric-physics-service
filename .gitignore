@@ -2,3 +2,8 @@
 # that configured it. Nothing here is built by hand into the source tree.
 test/dist/
 build-bench/
+
+# Rendered clips. The tool is the artefact; a 62 MB mezzanine is not.
+jenga_zones.mov
+determinism_tests.mov
+*.mov
