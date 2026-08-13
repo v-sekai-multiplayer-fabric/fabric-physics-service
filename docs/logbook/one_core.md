@@ -469,12 +469,67 @@ characters to dualise. **They are complements, not alternatives**, and carrying 
 - The curve figures are exact and proved by `native_decide` on 8×8 and 16×16 grids. Whether the
   ratios hold at the 30-bit codes actually used is not proved — and the one trend that was checked
   across a doubling **shrank**, so extrapolating them upward is not safe.
+- **Every Hilbert figure above is for a correct Hilbert curve, and the deployed one was not.**
+  See the amendment below; it was found after this section was written.
 - The 1600/4096 is worth noticing: Hilbert satisfies the linearity identity for a large minority
   of pairs, so **sampling a few pairs would make it look linear**. An earlier throwaway check with
   a wrong reflection term reported 146/4000 and would have supported the same conclusion for the
   wrong reason.
 - No routing overlay is built. The curve work says which code it would have to use, not that it
   is worth building — at present scales the log-depth saving is a wash.
+
+## 2026-08-12 (amendment): the curve we were measuring was not the curve we were running
+
+The section above compares Morton against Hilbert and reasons about which to keep. It is sound
+about the two curves and was answering the wrong question, because `Shared.hilbert3D` — the
+encoder every zone assignment, BVH sort key and authority lookup in this workspace goes through —
+**was not a Hilbert curve.**
+
+Walk the codes in order and every step must move exactly one cell. Measured:
+
+| encoder | consecutive steps that are NOT face-adjacent | max step |
+| --- | ---: | ---: |
+| `Shared.hilbert3D`, as deployed | **87.5%** (3583/4095 at 16³, 229375/262143 at 64³) | 19 |
+| Skilling 2004, correct | **0%** | 1 |
+| Morton | 50% | 63 |
+
+Confirmed three ways that share no code: a Lean adjacency test here, and two independent C ports
+written separately against the same file. All three agree on 87.5% to the digit.
+
+**It had Morton's locality and none of Morton's speed** — 5× the encode cost, worse zone
+connectivity (912 disconnected components for 112 zones, against Morton's 160 and a correct
+Hilbert's 112), and no better mean locality.
+
+### Why it survived
+
+Everything that was being checked passed. It is a clean bijection over 1024³ → [0, 2³⁰). The
+round trip closes. The docstring cites a paper. **None of those distinguish a Hilbert curve from
+any other bijection**, and that is the whole lesson: the tests asserted consequences of the
+property instead of the property.
+
+Two deviations from Skilling 2004, both needed. The main loop omitted `i = 0`, where the exchange
+branch is a no-op — which is why it looks droppable — but the invert branch is not; and it ran
+the remaining pairs backwards, which matters because every step mutates `X[0]`. The interleave
+then emitted `z` as the most significant bit of each group where `x` belongs. Fixing only the
+first leaves 87.5% unchanged.
+
+Fixed in `lean-shared-core#2`, with the defining property as a build-time gate, plus the
+worst-case run-extent bound — a run of L consecutive codes fits in a box of side `2·L^(1/3) − 1`,
+which is the actual reason to pay for this curve, since Morton has no such bound at any L.
+
+### What this costs, and what it does not say
+
+- **Every code value changes.** Any persisted Hilbert code, or a zone assignment derived from
+  one, is invalidated.
+- The forward fix and the matching inverse in `lean-spatial-oracle`'s `CodeGen.lean` **must land
+  together**; either alone leaves the round trip closing on the wrong cell.
+- `thirdparty/spatial-oracle` here is a vendored copy still carrying the old inverse. It is not
+  re-vendored yet, because the rule is to fix upstream first and vendor a merged fix.
+- **No timing in this logbook is invalidated.** The bug is a locality defect, not a cost one, and
+  no entry above measured broadphase or zone assignment — the benchmarks use ghost-AABB overlap
+  with a counting sink. What is invalidated is any *locality* claim made about production.
+- The head-to-head numbers behind the amendment were produced by two agents in a scratch
+  directory, not by anything in this tree, and are not reproducible from this repository.
 
 ## Every run, as it was logged
 
