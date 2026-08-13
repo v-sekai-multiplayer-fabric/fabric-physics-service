@@ -77,6 +77,10 @@ endif()
 # Building the engine here is what makes running it free, and a test that has never run is not a
 # test.
 enable_testing()
+# Freeze on settle: the one mechanism that makes a built world affordable.
+add_executable(freeze_test freeze_test.c freeze.c)
+target_link_libraries(freeze_test PRIVATE mj_physics)
+
 add_executable(mj_freefall ${PHYSICS_ROOT}/thirdparty/mujoco-riscv64/test/unit/test_mj_physics_freefall.c)
 target_link_libraries(mj_freefall PRIVATE mj_physics)
 add_test(NAME mj_freefall COMMAND mj_freefall)
@@ -87,6 +91,7 @@ if(NOT WIN32)
   target_link_libraries(bench_players PRIVATE m)
   target_link_libraries(mj_freefall PRIVATE m)
   target_link_libraries(determinism_probe PRIVATE m)
+  target_link_libraries(freeze_test PRIVATE m)
 endif()
 
 # MuJoCo builds as a shared library, and Windows looks for a DLL beside the executable rather
