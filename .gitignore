@@ -7,3 +7,4 @@ build-bench/
 jenga_zones.mov
 determinism_tests.mov
 *.mov
+build_freeze.log

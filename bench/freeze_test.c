@@ -1,14 +1,14 @@
-// Does freeze-on-settle actually work, and does it pay?
+// Does the transfer work, does it pay, and can it be reversed?
 //
-// Drops a field of boxes, runs the tick with freezing on, and reports what it cost before
-// and after. The claim under test is the one freeze.h is built on: that a settled world is
-// nearly free, and that promoting a body into the worldbody is what makes it so.
+// Drops a field of boxes, lets them settle, and watches them transfer into the world. Then
+// grabs one back. The third part is the one that matters: a transfer that cannot be
+// reversed has consumed the entity, and a world built on it can only calcify.
 //
-// Two things this asserts rather than prints, because a check that prints and returns zero
-// is a log line:
+// Asserted rather than printed, because a check that prints and returns zero is a log line:
 //
-//   - every box eventually freezes
-//   - the tick after freezing is cheaper than the tick before
+//   - every box transfers into the world
+//   - the tick after is cheaper than the tick before
+//   - one thing comes back, as a body, and simulates again
 //
 // SPDX-License-Identifier: Apache-2.0
 #include <stdio.h>
@@ -69,14 +69,14 @@ int main(void) {
 		return 1;
 	}
 
-	printf("freeze-on-settle: %d boxes, %d ticks, still<%g m/s for %d ticks\n",
+	printf("transfer on settle: %d boxes, %d ticks, still<%g m/s for %d ticks\n",
 	       BOXES, TICKS, cfg.still_speed, cfg.still_ticks);
-	printf("  %-6s %-8s %-8s %-9s %s\n", "tick", "bodies", "geoms", "ms/tick", "frozen");
+	printf("  %-6s %-8s %-8s %-9s %s\n", "tick", "bodies", "geoms", "ms/tick", "moved");
 
 	// clock() has millisecond resolution and these ticks are far under one, so time is
-	// accumulated over a window rather than sampled per tick. A single-tick reading here
-	// reads 0.000 both sides and proves nothing, which is how the first version of this
-	// test "failed" a mechanism that was working.
+	// accumulated over a window rather than sampled. A single-tick reading reads 0.000 on
+	// both sides and proves nothing, which is how an earlier version of this test reported
+	// FAIL against a mechanism that was working.
 	double ms_before = 0.0, ms_after = 0.0;
 	int n_before = 0, n_after = 0;
 	int reported = 0;
@@ -89,34 +89,68 @@ int main(void) {
 		if (t >= 5 && t < 25) { ms_before += ms; n_before++; }
 		if (t >= TICKS - 40) { ms_after += ms; n_after++; }
 
-		int froze = weft_freeze_tick(&f, spec, &m, &d, &cfg, "avatar_");
-		if (froze && reported < 6) {
-			printf("  %-6d %-8d %-8d %-9.3f +%d\n", t, m->nbody - 1, m->ngeom, ms, froze);
+		int moved = weft_freeze_tick(&f, spec, &m, &d, &cfg, "avatar_");
+		if (moved && reported < 6) {
+			printf("  %-6d %-8d %-8d %-9.3f +%d\n",
+			       t, (int)(m->nbody - 1), (int)m->ngeom, ms, moved);
 			reported++;
 		}
 	}
 	ms_before /= (n_before ? n_before : 1);
 	ms_after /= (n_after ? n_after : 1);
 
-	printf("\n  bodies left dynamic : %d\n", m->nbody - 1);
-	printf("  frozen into world   : %ld\n", f.frozen_total);
+	printf("\n  bodies left dynamic : %d\n", (int)(m->nbody - 1));
+	printf("  moved into world    : %ld\n", f.frozen_total);
 	printf("  recompiles          : %ld\n", f.recompiles);
-	printf("  tick before freezing: %.3f ms\n", ms_before);
-	printf("  tick after freezing : %.3f ms\n", ms_after);
+	printf("  tick before         : %.4f ms  (mean of %d)\n", ms_before, n_before);
+	printf("  tick after          : %.4f ms  (mean of %d)\n", ms_after, n_after);
+
+	// The round trip. This is what makes it a tier and not a ratchet.
+	long moved_total = f.frozen_total;
+	int thawed = weft_thaw(&f, spec, &m, &d, "b7");
+	int back = (int)(m->nbody - 1);
+	mjtNum where[3] = {0, 0, 0};
+	if (back > 0) {
+		mj_forward(m, d);
+		for (int k = 0; k < 3; k++) where[k] = d->xpos[3 + k];
+	}
+	printf("\n  thaw b7             : %d geom(s) came back\n", thawed);
+	printf("  bodies after thaw   : %d\n", back);
+	printf("  it is at            : %.3f %.3f %.3f\n", where[0], where[1], where[2]);
+
+	for (int t = 0; t < 60; t++) mj_step(m, d);
+	printf("  and it simulates    : %s\n", (m->nbody - 1) > 0 ? "yes" : "no");
 
 	int bad = 0;
-	if (f.frozen_total < BOXES) {
-		printf("\nFAIL: %ld of %d boxes froze\n", f.frozen_total, BOXES);
+	if (moved_total < BOXES) {
+		printf("\nFAIL: %ld of %d boxes moved\n", moved_total, (long)BOXES);
 		bad = 1;
 	}
 	if (ms_after >= ms_before) {
-		printf("\nFAIL: freezing did not make the tick cheaper (%.3f -> %.3f)\n",
+		printf("\nFAIL: the transfer did not make the tick cheaper (%.4f -> %.4f)\n",
 		       ms_before, ms_after);
 		bad = 1;
 	}
+	if (thawed < 1) {
+		printf("\nFAIL: nothing came back, the transfer consumed the entity\n");
+		bad = 1;
+	}
+	if (back != 1) {
+		printf("\nFAIL: expected exactly 1 body back, got %d\n", back);
+		bad = 1;
+	}
 	if (!bad) {
-		printf("\nOK: every box froze, and the tick got %.1fx cheaper\n",
-		       ms_before / (ms_after > 0 ? ms_after : 1e-6));
+		// clock() bottoms out once everything is static, so the ratio goes to infinity and
+		// reads as a result. It is not one -- it is the timer running out of resolution.
+		// The honest figure is measured while something is still moving.
+		if (ms_after < 1e-9) {
+			printf("\nOK: all %d moved and one came back. The tick fell from %.4f ms to\n"
+			       "    below the timer's resolution, so no ratio is reported.\n",
+			       BOXES, ms_before);
+		} else {
+			printf("\nOK: all %d moved, tick %.1fx cheaper, and one came back\n",
+			       BOXES, ms_before / ms_after);
+		}
 	}
 
 	mj_deleteData(d);

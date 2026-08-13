@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "freeze.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -155,6 +156,18 @@ int weft_freeze_tick(weft_freeze_t *f, mjSpec *spec, mjModel **m, mjData **d,
 			const int gi = mm->body_geomadr[b] + g;
 			mjsGeom *ng = mjs_addGeom(world, NULL);
 			if (!ng) continue;
+
+			// The transfer CARRIES the entity, it does not consume it. Without this the
+			// promoted geom is anonymous world scenery: nothing records what it was, so it
+			// can never be thawed, removed, or attributed to whoever built it. Under "only
+			// things in the physics engine exist" that is not a lost index somewhere else --
+			// the object has stopped being an object.
+			//
+			// `name#g` is enough to find every piece of one thing again, which is all the
+			// reverse transfer needs.
+			char gname[128];
+			snprintf(gname, sizeof(gname), "%s" WEFT_FROZEN_SEP "%d", nm, g);
+			mjs_setName(ng->element, gname);
 			ng->type = (mjtGeom)mm->geom_type[gi];
 			for (int k = 0; k < 3; k++) ng->size[k] = mm->geom_size[3 * gi + k];
 
@@ -196,4 +209,81 @@ int weft_freeze_tick(weft_freeze_t *f, mjSpec *spec, mjModel **m, mjData **d,
 		}
 	}
 	return frozen;
+}
+
+// ── The reverse ──────────────────────────────────────────────────────────────────────
+//
+// World back to dynamic, when somebody grabs a thing they built. The same transfer with
+// the endpoints swapped: find every geom carrying this identity, make a body at the first
+// one's pose, move the geoms onto it, delete the world copies, recompile.
+//
+// This is what makes freezing a tier rather than a ratchet. A world that can only accrete
+// is not one people can build in.
+int weft_thaw(weft_freeze_t *f, mjSpec *spec, mjModel **m, mjData **d, const char *name) {
+	if (!f || !spec || !m || !*m || !d || !*d || !name || !*name) return 0;
+	mjModel *mm = *m;
+
+	// Collect the frozen pieces of this identity from the compiled model, where the poses
+	// are, before touching the spec.
+	int ids[32];
+	int n = 0;
+	const size_t plen = strlen(name);
+	for (int g = 0; g < mm->ngeom && n < 32; g++) {
+		if (mm->name_geomadr[g] < 0) continue;
+		const char *gn = mm->names + mm->name_geomadr[g];
+		if (strncmp(gn, name, plen) == 0 && strncmp(gn + plen, WEFT_FROZEN_SEP,
+		                                            strlen(WEFT_FROZEN_SEP)) == 0) {
+			ids[n++] = g;
+		}
+	}
+	if (!n) return 0;
+
+	mjsBody *world = mjs_findBody(spec, "world");
+	if (!world) return 0;
+
+	// The body goes at the first piece's pose; the rest come along at their offsets from it,
+	// so a multi-geom thing keeps its shape across the transfer.
+	const mjtNum *bp = mm->geom_pos + 3 * ids[0];
+	const mjtNum *bq = mm->geom_quat + 4 * ids[0];
+
+	mjsBody *nb = mjs_addBody(world, NULL);
+	if (!nb) return 0;
+	mjs_setName(nb->element, name);
+	for (int k = 0; k < 3; k++) nb->pos[k] = bp[k];
+	for (int k = 0; k < 4; k++) nb->quat[k] = bq[k];
+	mjs_addFreeJoint(nb);
+
+	mjtNum inv[4];
+	mju_negQuat(inv, bq);
+
+	for (int i = 0; i < n; i++) {
+		const int gi = ids[i];
+		mjsGeom *ng = mjs_addGeom(nb, NULL);
+		if (!ng) continue;
+		ng->type = (mjtGeom)mm->geom_type[gi];
+		for (int k = 0; k < 3; k++) ng->size[k] = mm->geom_size[3 * gi + k];
+
+		mjtNum rel[3], relq[4];
+		mju_sub3(rel, mm->geom_pos + 3 * gi, bp);
+		mju_rotVecQuat(rel, rel, inv);
+		mju_mulQuat(relq, inv, mm->geom_quat + 4 * gi);
+		for (int k = 0; k < 3; k++) ng->pos[k] = rel[k];
+		for (int k = 0; k < 4; k++) ng->quat[k] = relq[k];
+
+		for (int k = 0; k < 3; k++) ng->friction[k] = mm->geom_friction[3 * gi + k];
+		for (int k = 0; k < 4; k++) ng->rgba[k] = mm->geom_rgba[4 * gi + k];
+		ng->condim = mm->geom_condim[gi];
+		ng->contype = mm->geom_contype[gi];
+		ng->conaffinity = mm->geom_conaffinity[gi];
+		ng->mass = 0.2;
+
+		const char *gn = mm->names + mm->name_geomadr[gi];
+		mjsElement *old = mjs_findElement(spec, mjOBJ_GEOM, gn);
+		if (old) mjs_delete(spec, old);
+	}
+
+	if (mj_recompile(spec, NULL, mm, *d) != 0) return 0;
+	f->recompiles++;
+	f->frozen_total -= n;
+	return n;
 }

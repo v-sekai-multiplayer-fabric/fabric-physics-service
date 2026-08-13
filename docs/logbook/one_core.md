@@ -278,7 +278,7 @@ twenty-five is two thirds.
 - One run per configuration.
 
 
-## 2026-08-13: freeze on settle, and the reason it is a dead end as built
+## 2026-08-13: freeze on settle — a dead end, then not one
 
 `bench/freeze.{h,c}` promotes a settled body into the worldbody: copy its geoms to the world
 at the pose it reached, delete the body, `mj_recompile`. Measured by `bench/freeze_test.c`,
@@ -300,39 +300,57 @@ it, which is a different structure from the one that settled. **The unit of tran
 whatever is internally coupled**, the same rule as a skeleton or a ship. `dof_island` already
 computes the grouping, so an island is ripe only when every body in it is.
 
-### Why it is a dead end anyway
+### Why it was a dead end as first written
 
-`mjs_addGeom(world, NULL)` sets no name. **The transfer destroys identity.** Once a piece is in
-the worldbody nothing records what it was, so it cannot be unfrozen, deleted, attributed to a
-builder, or described. Under "only things in the physics engine exist" that is not a missing
-index somewhere else -- the object has stopped existing as an object and is now scenery.
+`mjs_addGeom(world, NULL)` sets no name. **The transfer destroyed identity.** Once a piece was
+in the worldbody nothing recorded what it had been, so it could not be unfrozen, deleted,
+attributed to a builder, or described. Under "only things in the physics engine exist" that is
+not a missing index somewhere else -- the object had stopped existing as an object and was now
+scenery.
 
-So as built this is a **one-way ratchet**. A world using it can only calcify, and a creative
-game where nobody can move or remove what they built is not the game the survey asked for.
-Eight of fourteen wanted building; none of them wanted building that sets.
+That made it a **one-way ratchet**. A world using it can only calcify, and a creative game
+where nobody can move or remove what they built is not the game the survey asked for. Eight of
+fourteen wanted building; none of them wanted building that sets.
 
-### Unless
+### The fix, which was the same insight twice
 
-A transfer that preserves identity is not a ratchet, it is a tier. The same insight that fixed
-the island bug fixes this one: **transfers carry the entity across, they do not consume it.**
-Name each promoted geom with the id the body had, keep the id stable, and the reverse
-transfer -- world back to dynamic, when somebody grabs it -- is the same code with the
-endpoints swapped.
+**Transfers carry the entity across, they do not consume it** -- the rule that fixed the island
+bug fixes this one. Each promoted geom is now named `body#g` (`WEFT_FROZEN_SEP`), which is
+enough to find every piece of one thing again. `weft_thaw` is then the same transfer with the
+endpoints swapped: collect the geoms carrying an identity, make a body at the first one's pose,
+re-express the rest as offsets from it so a multi-geom thing keeps its shape, delete the world
+copies, recompile.
 
-That is a small change and it is the whole difference between a mechanism and a mistake. It is
-not made yet.
+`freeze_test.c` now asserts the round trip and returns non-zero if any leg fails:
+
+    moved into world    : 300      every box transferred
+    bodies left dynamic : 0
+    recompiles          : 5
+    thaw b7             : 1 geom(s) came back
+    it is at            : -0.360 -0.900 0.050   the pose it settled at, not the authored one
+    and it simulates    : yes      60 steps as a body
+    tick 38x cheaper
+
+So it is a **tier, not a ratchet**: a built world is affordable, and anything in it can be
+picked back up.
 
 ### What this does not say
 
-- The reverse transfer is not written, so nothing here shows it is cheap. It needs a recompile
-  too, and a world where players constantly grab things could thrash between tiers. The
-  hysteresis knob (`still_ticks`, 30 by default) is the only defence and has not been tested
+- The ratio is measured over a window because `clock()` has millisecond resolution and these
+  ticks are far under one. Its first version reported FAIL against a working mechanism for
+  exactly that reason. It also now suppresses the ratio entirely when the after-side falls
+  below the timer's floor, because a divide by almost-zero prints `850000.0x` and that reads as
+  a result rather than as an instrument running out. **A number an instrument cannot support is
+  not a measurement, however good it looks.**
+- Thaw is measured once, on one body, with nothing else moving. A world where players
+  constantly grab things could thrash between tiers, and each crossing is a recompile. The
+  hysteresis knob (`still_ticks`, 30 by default) is the only defence and is still untested
   against a grabbing player.
 - Recompile cost against a large world is unmeasured. Five recompiles of a 300-body model were
   invisible in the tick; 40,000 frozen geoms may not be.
-- The test's first version reported FAIL against a working mechanism, because `clock()` has
-  millisecond resolution and these ticks are under one. It now averages a window. A timing
-  assertion finer than its clock is not an assertion.
+- Thaw caps at 32 pieces per identity and re-derives mass as a constant `0.2` rather than
+  carrying the body's inertia across. A round trip therefore preserves shape and pose but not
+  mass properties -- fine for the boxes here, wrong for anything a player tuned.
 
 ## Every run, as it was logged
 

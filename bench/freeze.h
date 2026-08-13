@@ -46,6 +46,10 @@ typedef struct {
 
 weft_freeze_cfg weft_freeze_defaults(void);
 
+// What separates an identity from its geom index in a frozen name: "crate7#0", "crate7#1".
+// The reverse transfer finds every piece of one thing by this prefix.
+#define WEFT_FROZEN_SEP "#"
+
 // Per-body bookkeeping. Sized to the model at init and reallocated on recompile.
 typedef struct {
 	int  *still_for;      // consecutive ticks each body has been still
@@ -67,6 +71,13 @@ void weft_freeze_close(weft_freeze_t *f);
 // dynamic: a skeleton is not scenery, however still it is holding.
 int weft_freeze_tick(weft_freeze_t *f, mjSpec *spec, mjModel **m, mjData **d,
                      const weft_freeze_cfg *cfg, const char *keep_prefix);
+
+// World back to dynamic: the same transfer with the endpoints swapped, for when somebody
+// grabs a thing they built. Returns how many geoms came back, 0 if that identity is not
+// frozen here. Recompiles, so `m`/`d` are rebuilt and cached ids are stale.
+//
+// Without this, freezing is a one-way ratchet and a built world can only calcify.
+int weft_thaw(weft_freeze_t *f, mjSpec *spec, mjModel **m, mjData **d, const char *name);
 
 #ifdef __cplusplus
 }
