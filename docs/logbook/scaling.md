@@ -149,3 +149,66 @@ degenerates when they crowd. And now a seam costs in proportion to the motion cr
 - Both scripts now flag divergence above one full block. `jenga_multizone.py` originally used
   half a block, so the same 14.32 mm read DIVERGED there and agreed here. One number, two
   verdicts, which is exactly the kind of thing this logbook exists to catch.
+
+## 2026-08-12: a tall tower, and a pull done as an avatar motion
+
+Everything above deleted a block to make a tower fall, which is not what a player does. A
+player's hands are mocap bodies -- no degrees of freedom, position written every tick, still
+colliding -- so `bench/jenga_tall.py` makes the block being removed a mocap body and slides it
+out over time. The tower has to survive being handled rather than survive a deletion.
+
+### How tall it stands, and what it costs
+
+| levels | blocks | height | verdict | ms/tick |
+| ---: | ---: | ---: | --- | ---: |
+| 18 | 54 | 26 cm | stands | 5.70 |
+| 30 | 90 | 44 cm | **stands** | 55.44 |
+| 45 | 135 | 67 cm | falls | 88.31 |
+| 60 | 180 | 89 cm | falls | 141.47 |
+
+Thirty levels is about the limit, and it already costs 55 ms of a 50 ms tick while it is
+settling. Timed over the settling, so this is the expensive window rather than the steady state
+-- the same trap the sleep entry documents, and worth naming again here because the number looks
+alarming out of context.
+
+### The pull matters as much as the block
+
+At thirty levels, only one extraction leaves it standing:
+
+| speed | level 6 (low) | level 15 (middle) |
+| --- | --- | --- |
+| 2 cm/s | collapses | **stands** |
+| 10 cm/s | collapses | collapses |
+| 50 cm/s | collapses | collapses |
+
+A slow pull at mid-height survives; brisk at the same block does not. **The speed of the avatar
+motion is as much of a variable as which block is chosen**, which nothing in this workspace had
+considered -- an avatar's hands move at whatever speed a person moves them, and that is an input
+the zone does not control.
+
+### Across zones, a collapsing tall tower does not merely drift
+
+| zones | seams | mean drift | max drift |
+| ---: | ---: | ---: | ---: |
+| 2 | 1 | 272.32 mm | 648.96 mm |
+| 3 | 2 | 273.40 mm | 650.79 mm |
+| 5 | 4 | 276.57 mm | 651.13 mm |
+| 10 | 9 | 284.78 mm | 651.27 mm |
+
+651 mm on a 44 cm tower. The zones are not disagreeing about where a block is, they are
+simulating **different collapses**. And the seam-count rule holds even here -- one seam to nine
+costs 13 mm out of 651 -- which confirms it at a scale where the error is total rather than
+marginal.
+
+So the earlier finding stands and sharpens: seam count is free, motion is not, and past some
+amount of motion the boundary stops being an approximation and becomes a different simulation.
+
+### What this does not say
+
+- Ghosts are still frozen, with no velocity and no handoff. This is the floor.
+- One run per configuration. A collapse is chaotic and the 651 mm should be read as "total",
+  not as a repeatable quantity.
+- The 55 ms at thirty levels is measured across settling, not at rest.
+- `tools/record_jenga_tall.py` films it at 1920x1080, five colour-coded zones, mocap hand in
+  red. It renders at **0.99x realtime**, which is marginally under the bar the video work set
+  and is stated rather than rounded up.
