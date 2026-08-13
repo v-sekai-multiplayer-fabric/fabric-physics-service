@@ -21,6 +21,8 @@ import time
 import mujoco
 import numpy as np
 
+from human_scale import like
+
 HX, HY, HZ = 0.0375, 0.0125, 0.0075
 LEVELS, PER_LEVEL = 18, 3
 STEPS = 500
@@ -112,8 +114,9 @@ def report(label, zones, pull, truth):
     assert not np.isnan(got).any(), 'a block was owned by no zone'
     drift = np.linalg.norm(got - truth, axis=1)
     flag = 'agrees' if drift.max() < HZ * 2 else 'DIVERGED'
+    mx = drift.max()*1000
     print(f'   {label:<34} mean {drift.mean()*1000:7.2f} mm   '
-          f'max {drift.max()*1000:8.2f} mm   {flag}')
+          f'max {mx:8.2f} mm  {flag:9} {like(mx)}')
     return drift.max()
 
 

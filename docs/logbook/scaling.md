@@ -212,3 +212,62 @@ amount of motion the boundary stops being an approximation and becomes a differe
 - `tools/record_jenga_tall.py` films it at 1920x1080, five colour-coded zones, mocap hand in
   red. It renders at **0.99x realtime**, which is marginally under the bar the video work set
   and is stated rather than rounded up.
+
+## 2026-08-12: the category, costed -- and Jenga was the wrong model
+
+Almost nothing in this category does rigid-body contact. An avatar is driven from outside, the
+world it stands on is static geometry that never enters the broadphase, and props are decoration.
+So a tower of coupled blocks measures a workload no shipped game in the category has, and the
+Jenga entries above should be read as a stress test rather than as a model of anything.
+
+`bench/mmog_archetypes.py` costs the shapes the category does have, at **56 entities a player** --
+a full game avatar with rig, held items and effects, not the three-entity head-and-hands
+abstraction the physics bench uses.
+
+| shape | players | entities | zones | ms/zone | of tick |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| instanced dungeon | 5 | 300 | 1 | 0.6 | 1% |
+| instanced raid | 24 | 1,384 | **1** | 1.9 | 4% |
+| open-world questing zone | 150 | 8,460 | 7 | 1.1 | 2% |
+| capital city / social hub | 400 | 22,400 | 16 | 1.0 | 2% |
+| large-scale siege | 400 | 22,500 | 17 | 1.1 | 2% |
+| fleet battle | 800 | 45,000 | 33 | 1.1 | 2% |
+| battle royale | 100 | 5,900 | 5 | 2.1 | 4% |
+| VR social, crowded | 200 | 11,350 | 9 | 1.3 | 3% |
+| survival, placed structures | 80 | 4,930 | 4 | 5.7 | 11% |
+| physics sandbox, mid-build | 60 | 4,360 | 4 | 10.9 | 22% |
+
+**Every shape fits once zoned, and the tick is never the constraint** -- the busiest zone in the
+whole category is 22%, and that is the only one with coupled bodies in it.
+
+A twenty-four player raid is 1384 of 1400 entities: **exactly one zone**. Whether or not anyone
+intended it, the constant is sized for instanced content.
+
+Everything else is a zone-count question rather than a performance one, and that works because
+**the things being split do not couple**. Avatars are driven from outside and do not push each
+other; ships in a fleet pass at range. Splitting either across a boundary costs a ghost and
+nothing more, which is the same reason a stack of blocks cannot be split at all.
+
+### Millimetres in things you can picture
+
+`bench/human_scale.py` annotates every drift figure, because past a centimetre the number stops
+carrying any sense of size:
+
+| drift | | what it was |
+| ---: | --- | --- |
+| 2.97 mm | a grain of rice | settled tower, any partition |
+| 14.48 mm | **a Jenga block is this tall** | collapsing tower, any partition |
+| 534.60 mm | a pillow | coupled towers across a seam |
+| 651.27 mm | a bicycle wheel | tall tower collapsing, 9 seams |
+| 861.36 mm | a kitchen counter is this high | free bodies across a seam |
+
+The 14.48 mm row is the useful one: two zones disagreeing about a block by exactly one block.
+
+### What this does not say
+
+- The whole table is arithmetic on per-entity costs measured elsewhere, not a measured zone.
+- **56 entities a player is a stated figure, not a measured one.** Nothing here has measured what
+  a 56-entity avatar costs, and if those entities are articulated rather than driven from
+  outside, every row moves.
+- The archetype compositions are estimates of what these games contain. They are the shape of the
+  category as understood, not a survey.
