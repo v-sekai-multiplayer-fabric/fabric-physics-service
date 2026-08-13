@@ -100,3 +100,52 @@ constants and a chunking routine are worth more than any factor of sixteen on th
   measurement is what would put a real number in the CPU column.
 - The sweep divides both costs by the same factor, which is a modelling convenience. Compression
   and solver speed do not improve together in practice.
+
+## 2026-08-12: a zone seam costs motion, not seams
+
+A Jenga tower is one contact island top to bottom, so it is the sharpest test of what a
+boundary does to something spanning it. `bench/jenga_torture.py` cuts one every awkward way:
+horizontal slabs from two up to eighteen, a vertical plane that slices through levels rather
+than between them, and both crossed into a 3D grid. Ghosts are the naive kind -- a block
+outside a zone is a static geom at its start position, no velocity, no handoff.
+
+| partition | settled tower | collapsing tower |
+| --- | ---: | ---: |
+| 2 slabs, 1 seam | 2.27 mm | 14.32 mm |
+| 6 slabs, 5 seams | 2.90 mm | 14.47 mm |
+| 18 slabs, 17 seams | 2.97 mm | 14.49 mm |
+| vertical plane through levels | 2.97 mm | 14.48 mm |
+| 3D grid, 6 slabs x 2 halves | 2.97 mm | 14.48 mm |
+
+Maximum drift, against a whole-tower ground truth. A block is 15 mm tall.
+
+**Seam count does not matter.** Going from one seam to seventeen costs 0.17 mm on a collapsing
+tower and 0.70 mm on a settled one. Cutting through a contact plane rather than between two
+costs nothing measurable. A full 3D partition is indistinguishable from a single cut.
+
+The reason is what a frozen ghost is wrong by: how far that block would have moved. That does
+not depend on how many zones are looking at it, so the error saturates immediately and stays
+there. **What costs is ghosting something that is moving**, which is why the settled tower is
+six times better than the collapsing one at every partition.
+
+So the instinct to cut as little as possible is wrong. **Fine spatial partitioning is nearly
+free, and the fix for seam error is ghost velocities rather than fewer seams.** That is worth
+knowing before designing a zone layout around minimising boundaries.
+
+This is the third measurement today landing on the same rule. Sleep is worth 1.0x while things
+move and up to 1115x once they settle. Interest filtering caps cost when players are spread and
+degenerates when they crowd. And now a seam costs in proportion to the motion crossing it.
+**Settled things partition freely; moving things do not partition at all.**
+
+### What this does not say
+
+- The ghost model is the naive floor: frozen, no velocity, no handoff. A real implementation
+  carrying ghost velocities should beat every number here, and none of them is a limit.
+- Each configuration ran once. The settled column is stable to within a tenth of a millimetre
+  across partitions, which is reassuring; the collapsing column is one sample of a chaotic
+  process and should be read as indicative.
+- 500 steps at a 2 ms substep is one second of simulated time. A longer collapse would drift
+  further and nothing here says how much.
+- Both scripts now flag divergence above one full block. `jenga_multizone.py` originally used
+  half a block, so the same 14.32 mm read DIVERGED there and agreed here. One number, two
+  verdicts, which is exactly the kind of thing this logbook exists to catch.

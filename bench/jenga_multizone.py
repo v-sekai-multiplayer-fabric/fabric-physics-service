@@ -131,11 +131,11 @@ for cut in (3, 6, 9, 12, 15):
     drift = np.linalg.norm(stitched - truth, axis=1)
     print(f'   cut at level {cut:2d}: mean drift {drift.mean()*1000:8.2f} mm   '
           f'max {drift.max()*1000:9.2f} mm   '
-          f'{"agrees" if drift.max() < HZ else "DIVERGED"}')
+          f'{"agrees" if drift.max() < HZ * 2 else "DIVERGED"}')
 
 print()
-print(f'   (a block is {HZ*2*1000:.0f} mm tall; drift beyond that means the two zones')
-print('    disagree about where a block is by more than the block)')
+print(f'   (a block is {HZ*2*1000:.0f} mm tall; the threshold is one full block --')
+print('    jenga_torture.py uses the same one, so the verdicts agree)')
 
 # ── 4. split a COLLAPSING tower ─────────────────────────────────────────────────
 print()
@@ -152,6 +152,6 @@ for cut in (3, 6, 9, 12, 15):
     n_a = cut * PER_LEVEL - (1 if PULL[0] < cut else 0)
     stitched = np.vstack([pa[:n_a], pb[:len(truth2) - n_a]])
     drift = np.linalg.norm(stitched - truth2, axis=1)
-    verdict = 'agrees' if drift.max() < HZ else 'DIVERGED'
+    verdict = 'agrees' if drift.max() < HZ * 2 else 'DIVERGED'
     print(f'   cut at level {cut:2d}: mean drift {drift.mean()*1000:8.2f} mm   '
           f'max {drift.max()*1000:9.2f} mm   {verdict}')
