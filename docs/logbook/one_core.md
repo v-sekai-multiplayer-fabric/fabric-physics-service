@@ -531,6 +531,80 @@ which is the actual reason to pay for this curve, since Morton has no such bound
 - The head-to-head numbers behind the amendment were produced by two agents in a scratch
   directory, not by anything in this tree, and are not reproducible from this repository.
 
+## 2026-08-12: what is settled about the topology, and what is not
+
+Written because the question came back and nobody could answer it from the record. That is the
+finding: **no topology has been chosen, and none of the entries above says so.** A recommendation
+was made in conversation and a recommendation is not a decision, which is exactly the difference
+this file exists to keep.
+
+The comparison the plan called for -- `bench_players --topology authority|lockstep|relay` -- was
+never built. The plan said plainly that it "does not pick a topology, it produces the table that
+a decision can be made from". The table does not exist.
+
+### What is measured
+
+| | |
+| --- | ---: |
+| client-server, per subscriber, zstd -3 worst case | **0.349 Mbps** |
+| the same, uncompressed | 1.02 Mbps |
+| one zone's full state, one copy | 22.4 Mbps |
+| MuJoCo replays bit-identically | yes, nine shapes |
+
+Client-server's number is **O(1) in population**: `MAX_SLICE_ENTITIES` caps a slice at 64, so a
+subscriber costs the same at four players and at four hundred. That is the whole of its case and
+it is the only one of the three with a measured figure.
+
+### What is derived, not measured
+
+Lockstep is **O(N) per peer and cannot be interest-filtered** -- every peer needs every input, or
+it desyncs. A lost input is not a glitch but a permanent divergence, so inputs need redundancy,
+which is not free. Crossover against a 64-entity slice:
+
+| intent encoding | crossover |
+| --- | ---: |
+| 30 B, no redundancy | 74 players |
+| 3 poses quantised, no redundancy | 37 |
+| the same with 2x redundancy | **19** |
+
+Below that lockstep wins by a wide margin, which is why the article's four-player host chose it.
+A ward of 166 is not below it.
+
+Distributed authority was estimated at 0.402 Mbps a subscriber. **That number is a guess** -- slice
+cost plus an assumed authority overhead -- and nothing has measured it.
+
+### What is a theorem
+
+Attiya & Welch (1994): where message delay uncertainty is `u`, no algorithm implements
+linearizability with writes faster than **u/2**. A distributed-authority handoff is a linearizable
+write, so it pays that floor; a single authority has no seam and pays nothing. At a 50 ms tick
+with 20 ms of jitter that is 10 ms of the budget gone before any implementation exists.
+
+This is a stronger argument against topology 3 than the bandwidth estimate, because it is not an
+estimate.
+
+### The option nobody evaluated
+
+**Deterministic rollback.** Glenn's three are lockstep, client-server and distributed authority,
+and rollback was folded into the first without being examined. It is a different animal: same
+input-only bandwidth, so it inherits lockstep's O(N) unfilterable problem unchanged -- but it does
+**not** wait for the slowest peer. It predicts and resimulates on correction.
+
+That matters because O(N) bandwidth was the whole case against lockstep, and it survives; while
+the latency case, which was lockstep's other problem, does not apply at all. Stage 0 already
+proved the simulation replays bit-identically, which is rollback's precondition. So it is the one
+option that is neither ruled out nor examined.
+
+### What this does not say
+
+- **No decision is recorded here, deliberately.** Client-server has the only measured number and
+  the only population-independent cost, and that is a reason rather than a choice. Writing a
+  choice nobody made would be worse than leaving the question open.
+- Distributed authority's 0.402 Mbps is arithmetic on an assumption. Treat it as unmeasured.
+- Rollback has no numbers at all.
+- The three-topology bench is still unwritten, and it is the thing that would replace most of the
+  above with measurements.
+
 ## Every run, as it was logged
 
 `bench_players --log docs/logbook/one_core.md` appends here. The rows below are the raw
