@@ -141,6 +141,55 @@ crossover, it is that a smaller intent makes the filtered form cheaper still. 37
 0.249 Mbps; delta-coded at 1.5x it is 0.188. The compression work pays either way and the
 crossover arithmetic is a distraction from it.
 
+### The clustered forms, and where they stop being different things
+
+Clustered client-server is the model already in [scaling.md](scaling.md): zone cores that
+simulate, a stateless fan-out tier that distributes, seams carried as ghosts. The client draws
+and interpolates and simulates nothing.
+
+Clustered rollback is the interesting one, because clustering changes what a client has to
+simulate. In full lockstep every peer simulates the whole world. Filtered by interest, a peer
+only needs the 64 entities in its slice -- **21x less than the 1398 in the zone**. Costed against
+the measured island law:
+
+| | server, per tick | client, per tick | per-client |
+| --- | ---: | ---: | ---: |
+| clustered client-server | 19.6 ms | ~0, interpolation only | 0.349 Mbps |
+| clustered rollback, K=3 | 0, relay only | **2.96 ms x rollback depth** | 0.249 Mbps |
+
+Rollback depth is what decides it. One tick of correction is 2.96 ms; four is 11.8; eight is
+23.6. A 72 Hz frame is 13.9 ms total for render and logic, and a 20 Hz physics tick spans about
+three and a half of them, so five milliseconds of spare CPU per tick is a generous read of what a
+headset has.
+
+**So the 0.1 Mbps saving is bought with three to twenty-four milliseconds on the device least
+able to pay it.** Bandwidth was never the reason to prefer client-server; this is.
+
+### Clustering rollback turns it into distributed authority
+
+There is a structural problem underneath the arithmetic, and it is worth stating because it is
+easy to model past.
+
+Rollback works because every peer simulating the same inputs reaches the same state. A peer that
+simulates only its interest set is not simulating the same world as a peer whose set is different
+-- they agree in the overlap and diverge outside it. So a clustered rollback needs a rule for what
+happens at the boundary between two peers' sets: who is authoritative for a body both can see,
+and what happens when it crosses.
+
+That rule is distributed authority. Clustered rollback is not a fourth topology sitting beside
+the other three; it is topology 3 with prediction bolted on, and it inherits topology 3's floor:
+a linearizable handoff cannot beat **u/2** (Attiya & Welch 1994), which at 20 ms of jitter is
+10 ms of a 50 ms tick.
+
+Unclustered rollback avoids this entirely -- everyone simulates everything, so there are no
+boundaries -- and pays O(N) bandwidth for the privilege. The bandwidth and the seam are the same
+trade seen from two ends: filtering is what creates the boundary that then needs a protocol.
+
+**That is the finding.** The three topologies are not three points; lockstep and distributed
+authority are the ends of one axis, and where you sit on it is set by how much you filter.
+Client-server is off that axis, which is why it has neither problem: one simulator, no seam, no
+O(N).
+
 ### What this does not say
 
 - **All of the above is arithmetic on a model.** No rollback harness exists here. The 60 B intent
