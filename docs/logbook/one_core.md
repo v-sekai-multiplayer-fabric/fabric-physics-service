@@ -595,6 +595,50 @@ the latency case, which was lockstep's other problem, does not apply at all. Sta
 proved the simulation replays bit-identically, which is rollback's precondition. So it is the one
 option that is neither ruled out nor examined.
 
+### Rollback, and the version that escapes O(N)
+
+Rollback's bandwidth problem is lockstep's: every peer needs every input, because a distant
+player's action propagates. The escape is to bound propagation -- filter inputs by interest and
+route them through a relay, so a peer receives only the inputs that could reach it inside the
+rollback window. Modelled, with intent at 60 B a player a tick, doubled for the redundancy a
+desync-on-loss protocol cannot do without, and the interest set capped at 21 players (a
+64-entity slice, three entities an avatar):
+
+| players | lockstep | relayed rollback | client-server |
+| ---: | ---: | ---: | ---: |
+| 16 | 0.288 | **0.288** | 0.349 |
+| 64 | 1.210 | **0.403** | 0.349 |
+| 166 | 3.168 | **0.403** | **0.349** |
+| 1000 | 19.181 | **0.403** | **0.349** |
+
+**The escape works and does not pay.** Filtering makes the cost O(1) -- it saturates at 0.403
+Mbps and stops growing, which is the whole point. It also never gets below client-server's 0.349
+above about nineteen players, because twenty-one players' worth of redundant intent costs more
+than sixty-four entities' worth of compressed state. Redundancy costs more than compression
+saves.
+
+That is the same crossover the unfiltered comparison found. Interest-filtering does not move it;
+it only stops the curve running away above it.
+
+**And the latency is identical.** Relayed rollback is client to relay to client, which is 2d --
+the same as input up and state down. So against client-server it is not a latency-for-bandwidth
+trade at all: same delay, higher constant, and every client now simulates the world.
+
+Peer-to-peer rollback keeps the 1d latency, which is a real advantage and the reason fighting
+games use it. It also keeps the O(N) bandwidth, unfiltered, because that is the thing being
+traded away.
+
+### What this does not say
+
+- **All of the above is arithmetic on a model.** No rollback harness exists here. The 60 B intent
+  and the 2x redundancy are estimates, and the interest cap is read across from the slice.
+- Rollback's real cost is not in this table. Resimulating N ticks on every correction is CPU on
+  the client, and the client is a headset. Nothing here measures that, and it is the number that
+  would decide it.
+- The misprediction rate is unmeasured, and it sets both the resimulation cost and how often a
+  player sees a snap. A physics sandbox where players throw things at each other is a worse case
+  for prediction than a fighting game, which is where rollback's reputation comes from.
+
 ### What this does not say
 
 - **No decision is recorded here, deliberately.** Client-server has the only measured number and
