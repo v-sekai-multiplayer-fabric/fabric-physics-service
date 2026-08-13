@@ -71,9 +71,11 @@ made cheaper, and it is a question worth asking of anything that looks unsplitta
 
 ### Where all of it breaks here
 
-**Memory, and in the currency already short.** Superposition is k copies of an entity, and the
-entity budget is the binding constraint — at k=4 an 1800-entity ward holds 450 real entities. A
-mechanism that multiplies entity count is expensive exactly where this design has no room.
+**Not memory, which the first version of this entry got wrong.** Superposition is k copies of an entity, and this was recorded as expensive because the entity budget is the binding constraint. That confuses two things. `WARD_ENTITIES` binds on simulation cost and on the size of a reply, not on memory: 1800 entities at 100 bytes is 180 KB, and a server holding four copies of that would not notice.
+
+The asymmetry is the point. **A server has RAM precisely because it is not rendering** -- no textures, no meshes, no render targets, none of what fills a client's memory -- and a headset has none spare for the same reason. In a client-server design the clients never hold branches at all, because they do not simulate. So the machine that genuinely cannot spare memory is the one place this mechanism never reaches.
+
+The real cost is **k times the compute on contested entities**, and the deck creates copies only for out-reaching interactions rather than for everything -- a small subset, on the machine with the headroom. That is a much better trade than the first reading recorded.
 
 **Reduce is unsolved for contact.** Averaging two branches of a stack gives interpenetration:
 the mean of two valid states is not a valid state when the states satisfy contact constraints.

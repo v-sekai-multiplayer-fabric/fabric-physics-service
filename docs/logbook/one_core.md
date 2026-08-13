@@ -109,9 +109,24 @@ and reaches 23 m within two seconds, with the gap between levels closed to zero.
 - **Solver iterations.** 100 → 20 → 10 → 5 moved the worst tick by noise, and 10 came out worse
   than 100. There is no solver problem to cap.
 - **Sleeping.** `<flag sleep="enable"/>` takes the reported contact count to zero and changes the
-  run time not at all. That is the informative result: if contacts go to zero and the cost stays,
-  the cost was never in the contact solve. It is in collision detection, which still runs.
+  run time not at all -- **in the window this was measured over, which was from t=0 while the pile
+  was still collapsing.** That is a real result and it is not the general statement it reads as.
+  Re-measured across three scene shapes with repetitions, timing after the scene settles:
 
+  | scene | timed from t=0 | timed after 200 settling steps | contacts after |
+  | --- | ---: | ---: | ---: |
+  | flat field, 900 cubes | 1.0x | **32.0x** | 3600 -> 0 |
+  | pyramid, 204 cubes | 1.0x | **1115.8x** | 2851 -> 0 |
+  | towers, 240 cubes | 1.0x | **4.4x** | 1040 -> 224 |
+
+  Exactly 1.0x in all three while anything is moving, because nothing has fallen asleep yet.
+  The towers row is the useful one: they never fully come to rest, contacts stop at 224 rather
+  than 0, and the gain is 4.4x rather than a thousand. **The saving is not a property of the flag,
+  it is a property of how completely the scene settles.**
+
+  A sandbox is mostly settled -- somebody builds a stack and walks away -- so the steady-state
+  cost is far below what 900 dynamic cubes suggests. What this does NOT rescue is the moment of
+  collapse, which is where the 1840 ms tick came from and where sleep is worth exactly nothing.
 Both point the same way, and it is the same way the iteration result pointed. The time is spent
 before the solver.
 
