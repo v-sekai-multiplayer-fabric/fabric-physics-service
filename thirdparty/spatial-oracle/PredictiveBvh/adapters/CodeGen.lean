@@ -95,12 +95,15 @@ private def hilbert3dInverse (h : Nat) : Nat × Nat × Nat :=
   let order := 10
   let mask := (1 <<< order) - 1
   -- Deinterleave: extract transpose coordinates from interleaved bits
+  -- X[0] = x is the MOST significant of each 3-bit group, so x comes off `shift + 2`.
+  -- This mirrors `hilbertTransposeToIndex`; the two emit orders must agree or the round
+  -- trip closes on the wrong cell while still closing, which is how the previous bug hid.
   let (tx, ty, tz) := (List.range order).foldl (fun (x, y, z) bit =>
     let b := order - 1 - bit
     let shift := 3 * b
-    let x := x ||| (((h >>> shift) &&& 1) <<< b)
+    let z := z ||| (((h >>> shift) &&& 1) <<< b)
     let y := y ||| (((h >>> (shift + 1)) &&& 1) <<< b)
-    let z := z ||| (((h >>> (shift + 2)) &&& 1) <<< b)
+    let x := x ||| (((h >>> (shift + 2)) &&& 1) <<< b)
     (x &&& mask, y &&& mask, z &&& mask)) (0, 0, 0)
   -- Undo fixup: progressive decode (z0 ^ t) to recover pre-fixup z
   let t := (List.range (order - 1)).foldl (fun t i =>
@@ -109,13 +112,17 @@ private def hilbert3dInverse (h : Nat) : Nat × Nat × Nat :=
   let x1 := tx ^^^ t; let y1 := ty ^^^ t; let z1 := tz ^^^ t
   -- Undo Gray (reverse of y^=x; z^=y): z^=y first, then y^=x
   let z2 := z1 ^^^ y1; let y2 := y1 ^^^ x1
-  -- Undo main loop: Q from 2 to MSB, y-exchange then z-exchange
+  -- Undo main loop: Q from 2 to MSB, and within a level the three steps run in the
+  -- REVERSE of the forward's `x-self, (x,y), (x,z)`. Each step is its own inverse, so
+  -- undoing is the same three operations back-to-front — including the x-self step,
+  -- which the forward previously omitted altogether.
   let (x3, y3, z3) := (List.range (order - 1)).foldl (fun (x, y, z) j =>
     let q := 1 <<< (j + 1); let p := q - 1
-    let (x, y) := if y &&& q != 0 then (x ^^^ p, y) else
-      let t := (x ^^^ y) &&& p; (x ^^^ t, y ^^^ t)
     let (x, z) := if z &&& q != 0 then (x ^^^ p, z) else
       let t := (x ^^^ z) &&& p; (x ^^^ t, z ^^^ t)
+    let (x, y) := if y &&& q != 0 then (x ^^^ p, y) else
+      let t := (x ^^^ y) &&& p; (x ^^^ t, y ^^^ t)
+    let x := if x &&& q != 0 then x ^^^ p else x
     (x, y, z)) (x1, y2, z2)
   (x3 &&& mask, y3 &&& mask, z3 &&& mask)
 
