@@ -277,6 +277,63 @@ twenty-five is two thirds.
   tuned one. A tuned one with tighter limits would differ.
 - One run per configuration.
 
+
+## 2026-08-13: freeze on settle, and the reason it is a dead end as built
+
+`bench/freeze.{h,c}` promotes a settled body into the worldbody: copy its geoms to the world
+at the pose it reached, delete the body, `mj_recompile`. Measured by `bench/freeze_test.c`,
+which asserts rather than prints -- 300 boxes, every one freezes, and the tick goes from
+**0.85 ms to 0.025 ms, 34x**. `mj_recompile` carries `mjData` across, so everything still
+moving keeps its velocity and nothing jolts when a neighbour freezes.
+
+### It is a zone transfer, and naming it that fixed a bug
+
+A body leaves one owner and joins another, state has to survive, and there is a moment where
+getting it wrong duplicates or loses the thing. That is `Fabric.lean`'s
+`owned -> staging -> owned` with the world as the destination. It is the easy case only
+because there is no message delay: the delete and the add happen in one spec edit, so it is
+exactly-once by construction where a network handoff has to survive `u/2`.
+
+Seeing that named a real defect. The first version froze bodies one at a time, so a settled
+stack would transfer piecemeal -- the bottom becoming immovable while the top still leaned on
+it, which is a different structure from the one that settled. **The unit of transfer is
+whatever is internally coupled**, the same rule as a skeleton or a ship. `dof_island` already
+computes the grouping, so an island is ripe only when every body in it is.
+
+### Why it is a dead end anyway
+
+`mjs_addGeom(world, NULL)` sets no name. **The transfer destroys identity.** Once a piece is in
+the worldbody nothing records what it was, so it cannot be unfrozen, deleted, attributed to a
+builder, or described. Under "only things in the physics engine exist" that is not a missing
+index somewhere else -- the object has stopped existing as an object and is now scenery.
+
+So as built this is a **one-way ratchet**. A world using it can only calcify, and a creative
+game where nobody can move or remove what they built is not the game the survey asked for.
+Eight of fourteen wanted building; none of them wanted building that sets.
+
+### Unless
+
+A transfer that preserves identity is not a ratchet, it is a tier. The same insight that fixed
+the island bug fixes this one: **transfers carry the entity across, they do not consume it.**
+Name each promoted geom with the id the body had, keep the id stable, and the reverse
+transfer -- world back to dynamic, when somebody grabs it -- is the same code with the
+endpoints swapped.
+
+That is a small change and it is the whole difference between a mechanism and a mistake. It is
+not made yet.
+
+### What this does not say
+
+- The reverse transfer is not written, so nothing here shows it is cheap. It needs a recompile
+  too, and a world where players constantly grab things could thrash between tiers. The
+  hysteresis knob (`still_ticks`, 30 by default) is the only defence and has not been tested
+  against a grabbing player.
+- Recompile cost against a large world is unmeasured. Five recompiles of a 300-body model were
+  invisible in the tick; 40,000 frozen geoms may not be.
+- The test's first version reported FAIL against a working mechanism, because `clock()` has
+  millisecond resolution and these ticks are under one. It now averages a window. A timing
+  assertion finer than its clock is not an assertion.
+
 ## Every run, as it was logged
 
 `bench_players --log docs/logbook/one_core.md` appends here. The rows below are the raw
