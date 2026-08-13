@@ -230,6 +230,53 @@ in the zone. That is the same limit welding would impose, moved to where a playe
   *enforceable*, which is an argument about the mechanism, not evidence about its cost.
 - Lock acquisition is a distributed mutex and has its own floor — see the entry below.
 
+
+## 2026-08-12: what a Godot humanoid costs, driven and simulated
+
+"56 entities a player" is `SkeletonProfileHumanoid`, which is `bones.resize(56)` at
+`scene/resources/skeleton_profile.cpp:489`, `root_bone = "Root"`. A skeleton, not fifty-six
+loose objects, and two things follow that the archetype model assumed away.
+
+**A player is atomic.** Fifty-six bones are one coupled kinematic chain; a forearm and its hand
+cannot sit in different zones. The unit of assignment is an avatar, so 1400 entities is really
+**twenty-five avatars**. Skeletons do not couple to each other, so zones still split freely at
+player boundaries -- the same shape as ships passing at range, and the opposite of a stack.
+
+**And the cost depends entirely on whether the bones are driven or simulated.**
+
+| avatars | bones | driven | us/bone | simulated | us/bone | ratio |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 56 | 0.019 ms | 0.34 | 1.181 ms | 21.08 | 62x |
+| 5 | 280 | 0.068 ms | 0.24 | 5.959 ms | 21.28 | 88x |
+| **25** | **1400** | **0.326 ms** | **0.23** | **33.666 ms** | **24.05** | **103x** |
+
+Driven is **cheaper than the archetype model assumed** -- 0.23 us a bone against the 0.74 it
+used, so that table was pessimistic by three times. A full zone of twenty-five avatars is 0.33
+ms, seven tenths of one percent of the tick. It also gets cheaper per bone as avatars are added,
+0.34 to 0.23, as the fixed per-step overhead amortises.
+
+Simulated is a different cost class: **103x**, and a zone of twenty-five ragdolls is 33.7 ms,
+**67% of the tick** before any props, game logic or fan-out.
+
+Worth noticing where that lands. A simulated bone at 24.05 us is almost exactly a loose dynamic
+cube at 21.40 us. **A ragdoll bone costs about what a physics crate costs**, which says the
+articulation is not doing anything special -- it is fifty-five more bodies to solve.
+
+So the entity budget is generous for driven avatars and cannot survive ragdolls at full
+occupancy. That is a **concurrent-ragdoll limit** rather than a player limit, it is a normal
+thing for a game to bound, and nothing here had named it. Ten simultaneous is 27% of the tick;
+twenty-five is two thirds.
+
+### What this does not say
+
+- Self-collision is off in both cases, and the driven bones are `contype=0 conaffinity=0`, so
+  neither figure includes an avatar colliding with anything. Adding that moves both.
+- The bone lengths are approximate. The count and the chain depth are what cost; the
+  millimetres are not.
+- Ball joints with a 60-degree range and 0.5 damping, which is a plausible ragdoll and not a
+  tuned one. A tuned one with tighter limits would differ.
+- One run per configuration.
+
 ## Every run, as it was logged
 
 `bench_players --log docs/logbook/one_core.md` appends here. The rows below are the raw
