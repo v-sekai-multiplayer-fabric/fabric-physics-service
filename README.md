@@ -31,7 +31,7 @@ source rather than copied into it.
 
 ## Where the durable state is described
 
-This repository is a clone of [`service-store`](https://github.com/v-sekai-multiplayer-fabric/service-store),
+This repository is a clone of [`datasource-queen`](https://github.com/v-sekai-multiplayer-fabric/datasource-queen),
 and its README carried a copy of that repository's own documentation: the ring, the VFS, the
-`queen` tenant, CI, and state. That copy is gone. `service-store` is the one place those are
+`queen` tenant, CI, and state. That copy is gone. `datasource-queen` is the one place those are
 written, and its `docs/design.md` holds them.
