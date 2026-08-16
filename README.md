@@ -1,4 +1,4 @@
-# service-physics
+# interactor-ward
 
 A server-authoritative networked physics service for one ward, after
 [networked physics in virtual reality](https://gafferongames.com/post/networked_physics_in_virtual_reality/)
