@@ -1,9 +1,9 @@
 # fabric-physics-service
 
 This repository is a server-authoritative networked physics service for one ward. It starts as
-a clone of `fabric-store-domain` and still holds that repository's two planes: `queen`, a
-settlement game, and the store plane, SQLite on a VFS that keeps its pages in FoundationDB. The
-two planes link into one process.
+a clone of `datasource-queen` and still holds that repository's two processes: `queen`, a
+settlement game, and the data source, SQLite on a VFS that keeps its pages in FoundationDB. The
+two link into one process.
 
 The clone is the point rather than a shortcut. The physics service needs a zone with a durable
 ward, a 20 Hz publish, a fanout that slices, and a CI that runs against a live FoundationDB, and
