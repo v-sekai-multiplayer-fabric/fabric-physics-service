@@ -152,7 +152,7 @@ writes it to disk first; `fly/entrypoint.sh` does that.
 | Path                       | Source                                        |
 | -------------------------- | --------------------------------------------- |
 | `thirdparty/store-plane`   | `datasource-store`                          |
-| `thirdparty/gateway-edge`  | `transport-gateway`                         |
+| `thirdparty/gateway-edge`  | `transport-gateway-c`                         |
 | `thirdparty/taskweft`      | `nif`, the `standalone/` headers              |
 | `thirdparty/mujoco-riscv64`| `mujoco-riscv64`, MuJoCo 3.11.0 and its wiring |
 
